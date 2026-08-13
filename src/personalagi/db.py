@@ -33,7 +33,26 @@ def get_engine(settings: Settings | None = None) -> Engine:
         settings = settings or get_settings()
         _ensure_parent_dir(settings.database_url)
         _engine = create_engine(settings.database_url, echo=False)
+        _apply_pragmas(_engine)
     return _engine
+
+
+def _apply_pragmas(engine: Engine) -> None:
+    """WAL so a long ingest does not block reads.
+
+    Without it, a backfill holding a write transaction locks out every reader,
+    and running `status` mid-ingest fails with 'database is locked'. WAL is
+    also more crash-resilient, which matters because the cursor discipline
+    assumes a commit either lands or does not.
+    """
+    if not engine.url.get_backend_name().startswith("sqlite"):
+        return
+    if engine.url.database in (None, ":memory:"):
+        return  # WAL is meaningless for in-memory DBs
+    with engine.begin() as conn:
+        conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        conn.exec_driver_sql("PRAGMA busy_timeout=10000")
+        conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
 
 
 def _add_missing_columns(engine: Engine) -> list[str]:

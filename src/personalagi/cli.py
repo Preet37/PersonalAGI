@@ -92,6 +92,51 @@ def _build_parser() -> argparse.ArgumentParser:
         help="classify any labelled message that has no prediction yet",
     )
 
+    build = sub.add_parser("context-build", help="fold classified mail into person files")
+    build.add_argument("--account", default=None)
+    build.add_argument("--limit", type=int, default=None)
+    build.add_argument(
+        "--all-categories",
+        action="store_true",
+        help="include promotional and spam (default: skip them)",
+    )
+    build.add_argument(
+        "--include-automated",
+        action="store_true",
+        help="include noreply-style senders (default: skip them)",
+    )
+
+    show = sub.add_parser("context", help="retrieve context for one person")
+    show.add_argument("person", help="slug, name, or email")
+    show.add_argument("--query", default="", help="what you want relevant log lines about")
+    show.add_argument("-k", type=int, default=5, help="max log lines to retrieve")
+
+    find = sub.add_parser("search", help="full-text search across all log lines")
+    find.add_argument("query")
+    find.add_argument("--person", default=None)
+    find.add_argument("-k", type=int, default=10)
+
+    sub.add_parser("reindex", help="rebuild the FTS index from the markdown vault")
+
+    compact = sub.add_parser("compact", help="fold new log entries into profiles")
+    compact.add_argument("--person", default=None, help="slug; omit for everyone")
+    compact.add_argument(
+        "--force", action="store_true", help="recompact even if nothing changed"
+    )
+    compact.add_argument(
+        "--min-entries", type=int, default=2, help="skip people with fewer log entries"
+    )
+
+    correct = sub.add_parser(
+        "correct",
+        help="record an authoritative correction that compaction cannot overwrite",
+    )
+    correct.add_argument("person")
+    correct.add_argument("correction", help="e.g. 'Dana left Example Labs in June 2026'")
+
+    history = sub.add_parser("profile-history", help="show how a profile evolved")
+    history.add_argument("person")
+
     sub.add_parser("status", help="show per-account watermarks and counts")
     return parser
 
@@ -235,6 +280,141 @@ def _cmd_eval(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_context_build(args: argparse.Namespace) -> int:
+    from personalagi.context.store import DEFAULT_INCLUDE, build_people
+
+    result = build_people(
+        get_settings(),
+        account=args.account,
+        include_categories=("*",) if args.all_categories else DEFAULT_INCLUDE,
+        include_automated=args.include_automated,
+        limit=args.limit,
+    )
+    print(result.summary())
+    return 0
+
+
+def _cmd_context(args: argparse.Namespace) -> int:
+    from personalagi.context.retrieve import get_context
+
+    try:
+        context = get_context(args.person, args.query, get_settings(), k=args.k)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    if context is None:
+        print(f"No person file for '{args.person}'. Run `context-build` first.")
+        return 1
+
+    print(context.render())
+    print()
+    print(context.stats())
+    return 0
+
+
+def _cmd_search(args: argparse.Namespace) -> int:
+    from personalagi.db import get_engine
+    from personalagi.search.fts import search
+
+    hits = search(get_engine(get_settings()), args.query, person_slug=args.person, limit=args.k)
+    if not hits:
+        print("no matches")
+        return 1
+    for hit in hits:
+        print(f"{hit.person_name or hit.person_slug:<24} {hit.render()}")
+    return 0
+
+
+def _cmd_reindex(_: argparse.Namespace) -> int:
+    from personalagi.db import get_engine, init_db
+    from personalagi.search.fts import reindex
+
+    settings = get_settings()
+    init_db(settings)
+    count = reindex(get_engine(settings), settings.context_dir)
+    print(f"Indexed {count} log line(s) from {settings.context_dir}")
+    return 0
+
+
+def _cmd_compact(args: argparse.Namespace) -> int:
+    from personalagi.context.compact import compact_all
+
+    result = compact_all(
+        get_settings(),
+        person=args.person,
+        force=args.force,
+        min_entries=args.min_entries,
+    )
+    print(result.summary())
+    if result.people:
+        print("  " + ", ".join(result.people[:10]))
+    return 0
+
+
+def _cmd_correct(args: argparse.Namespace) -> int:
+    from personalagi.context.compact import add_correction
+
+    try:
+        person = add_correction(args.person, args.correction, get_settings())
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    print(f"Correction recorded on {person.slug}:")
+    for item in person.corrections:
+        print(f"  - {item}")
+    print(
+        "\nThe profile is NOT edited directly - a direct edit would be undone by the\n"
+        "next compaction. Run `personalagi compact --person "
+        f"{person.slug} --force` to regenerate it under the correction."
+    )
+    return 0
+
+
+def _cmd_profile_history(args: argparse.Namespace) -> int:
+    import difflib
+
+    from personalagi.context.compact import read_history
+    from personalagi.context.retrieve import resolve_person
+
+    settings = get_settings()
+    try:
+        found = resolve_person(settings.context_dir, args.person)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if found is None:
+        print(f"no person file matching '{args.person}'", file=sys.stderr)
+        return 1
+
+    versions = read_history(settings.context_dir, found.slug)
+    if not versions:
+        print(f"no compaction history for {found.slug} yet")
+        return 1
+
+    previous = ""
+    for index, record in enumerate(versions):
+        print(f"--- version {index + 1}  {record['timestamp']}  "
+              f"(entries={record['log_entries']}, prompt={record.get('prompt_version', '?')})")
+        if previous:
+            diff = difflib.unified_diff(
+                previous.split(), record["profile"].split(), lineterm="", n=3
+            )
+            changed = [
+                d
+                for d in diff
+                if d.startswith(("+", "-")) and not d.startswith(("+++", "---"))
+            ]
+            print("    changed: " + (" ".join(changed[:40]) or "(no change)"))
+        else:
+            print(f"    {record['profile']}")
+        if record.get("corrections"):
+            print(f"    corrections in force: {len(record['corrections'])}")
+        previous = record["profile"]
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     from sqlmodel import Session
 
@@ -271,6 +451,13 @@ def main(argv: list[str] | None = None) -> int:
         "classify": _cmd_classify,
         "labels-template": _cmd_labels_template,
         "eval": _cmd_eval,
+        "context-build": _cmd_context_build,
+        "context": _cmd_context,
+        "search": _cmd_search,
+        "reindex": _cmd_reindex,
+        "compact": _cmd_compact,
+        "correct": _cmd_correct,
+        "profile-history": _cmd_profile_history,
         "status": _cmd_status,
     }
     try:
