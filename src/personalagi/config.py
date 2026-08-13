@@ -63,6 +63,13 @@ class Settings(BaseSettings):
     owner_emails: str = ""
     owner_name: str = ""
 
+    # --- Sending ---
+    # THE flag. False selects a transport that records instead of delivering,
+    # and every line of the send path runs against it -- so enabling this
+    # changes exactly one thing: where the bytes go. Not a guard that skips
+    # the interesting code until the day it matters.
+    send_enabled: bool = False
+
     # --- Proactive sweep (trigger B) ---
     # Every one of these bounds a plain database query. None of them cost a
     # model call; a model is only asked to WRITE a proposal that already fired.

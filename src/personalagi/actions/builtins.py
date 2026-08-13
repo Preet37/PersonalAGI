@@ -177,16 +177,53 @@ def write_file(path: str, content: str) -> Result:
 
 
 @action("send_email", tier=Tier.APPROVE)
-def send_email(to: str, subject: str, body: str) -> Result:
-    """Send mail. INERT — there is no SMTP or Gmail call in this function.
+def send_email(
+    to: str,
+    subject: str,
+    body: str,
+    cc: str = "",
+    evidence: list[int] | None = None,
+    confirmation=None,
+) -> Result:
+    """Send mail. Real code path, transport that does not deliver.
 
-    You cannot un-send an email, which is why this is APPROVE and why the
-    handler stays a stub until it has its own tests.
+    APPROVE because you cannot un-send an email. But the tier is not the only
+    guard: delivery also requires a confirmation token bound to a hash of the
+    exact content, produced by a surface that showed the owner the full body,
+    the real recipients, and the evidence. Editing the draft after approval
+    invalidates that approval by construction.
+
+    While SEND_ENABLED is false the transport records instead of delivering,
+    and every line here still runs -- so turning it on changes where the bytes
+    go and nothing else. A send path first exercised on the day it sends for
+    real is a send path nobody has tested.
     """
+    from personalagi.actions.transport import Outgoing, SendBlocked, send
+    from personalagi.config import get_settings
+
+    never_sent = {"to": to, "subject": subject, "sent": False}
+    if not to.strip():
+        return Result(ok=False, detail="send_email needs a recipient", data=never_sent)
+
+    message = Outgoing(
+        to=to, subject=subject, body=body, cc=cc,
+        evidence_event_ids=tuple(evidence or ()),
+    )
+    try:
+        outcome = send(message, get_settings(), confirmation=confirmation)
+    except SendBlocked as exc:
+        return Result(ok=False, detail=str(exc), data=never_sent)
+
     return Result(
-        ok=True,
-        detail=f"[inert] approved send to {to}: {subject!r}",
-        data={"to": to, "subject": subject, "chars": len(body), "sent": False},
+        ok=outcome.ok,
+        detail=outcome.detail,
+        data={
+            **never_sent,
+            # `sent` is True ONLY when a transport that really delivers did so.
+            "sent": outcome.transport != "recording" and outcome.ok,
+            "transport": outcome.transport,
+            "fingerprint": outcome.fingerprint,
+        },
     )
 
 
