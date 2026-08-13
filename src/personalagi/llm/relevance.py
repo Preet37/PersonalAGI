@@ -138,6 +138,54 @@ def direction_for(promiser: str, sent_by_owner: bool) -> str:
     return "i_owe" if author_owes else "they_owe"
 
 
+def render_activation(view: EventView, settings: Settings) -> str:
+    """Stage 20: what this event WAKES UP, as context for the relevance call.
+
+    The Deepgram case. A job alert is objectively bulk mail; it mattered
+    because someone the owner knows works there, he owes them a resume, and
+    that company might sponsor his hackathon. None of that is in the email, and
+    no amount of reading the email harder will find it.
+
+    So the graph is walked outward from this event's participants, with decay,
+    and what lights up is handed to the model alongside the message. The
+    relevance question stops being "is this email important" and becomes "what
+    does this connect to".
+
+    Degrades to "" when the graph is empty -- an empty section is better than
+    a section saying nothing was found, which invites the model to comment on
+    the absence.
+    """
+    try:
+        from personalagi.activate import (
+            activate,
+            label_nodes,
+            open_loops,
+            seeds_for_event,
+        )
+    except ImportError:  # pragma: no cover - activate is optional at runtime
+        return ""
+
+    seeds = seeds_for_event(view.event.id, settings)
+    if not seeds:
+        return ""
+    lit = label_nodes(activate(seeds, settings), settings)
+    loops = open_loops(lit, settings)
+    if not lit and not loops:
+        return ""
+
+    lines = []
+    if loops:
+        lines.append("OPEN LOOPS this touches:")
+        lines += [f"  - {loop}" for loop in loops[:6]]
+    top = [a for a in lit if a.node.type != "event"][:6]
+    if top:
+        if lines:
+            lines.append("")
+        lines.append("ALSO CONNECTED (brightest first):")
+        lines += [f"  - {a.label}  ({a.energy:.2f})" for a in top]
+    return "\n".join(lines)
+
+
 def render_context(view: EventView, settings: Settings) -> tuple[str, str, int]:
     """Retrieve the COUNTERPARTY's stored context. Returns (text, slug, tokens).
 
@@ -384,6 +432,12 @@ def score_messages(
 
     def work(view: EventView):
         context_text, slug, tokens = render_context(view, settings)
+        # Stage 20: what the event lights up, appended to the sender's file.
+        # A message from a stranger about a live commitment now carries that
+        # commitment into the call, which is the entire Deepgram argument.
+        woken = render_activation(view, settings)
+        if woken:
+            context_text = f"{context_text}\n\n{woken}"
         parsed, error = score_one(
             client, prompt, view, context_text, owner_label, owner_profile
         )

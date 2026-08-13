@@ -225,6 +225,25 @@ def _build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--max-iterations", type=int, default=None)
     inv.add_argument("--budget", type=int, default=None)
 
+    facts = sub.add_parser("facts", help="future-dated statements; a date is a trigger")
+    facts_sub = facts.add_subparsers(dest="facts_command", required=True)
+    f_ex = facts_sub.add_parser("extract", help="pull facts out of relevant events")
+    f_ex.add_argument("--limit", type=int, default=40)
+    f_ex.add_argument("--min-relevance", type=int, default=2)
+    f_ex.add_argument("--budget", type=int, default=40)
+    f_add = facts_sub.add_parser("add", help="record one by hand")
+    f_add.add_argument("statement")
+    f_add.add_argument("--from", dest="valid_from", type=date.fromisoformat, required=True)
+    f_add.add_argument("--until", dest="valid_until", type=date.fromisoformat, default=None)
+    f_list = facts_sub.add_parser("list", help="known facts, soonest first")
+    f_list.add_argument("--all", action="store_true")
+
+    con = sub.add_parser(
+        "contradictions", help="statements about one goal that cannot both be true"
+    )
+    con.add_argument("--goal", default=None)
+    con.add_argument("--budget", type=int, default=10)
+
     owed = sub.add_parser("owed", help="open commitments, grouped by person")
     owed.add_argument(
         "--to-me",
@@ -731,6 +750,44 @@ def _cmd_investigate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_facts(args: argparse.Namespace) -> int:
+    from personalagi import facts as facts_mod
+    from personalagi.records import CallBudget
+
+    settings = get_settings()
+    if args.facts_command == "extract":
+        result = facts_mod.extract_facts(
+            settings, limit=args.limit, min_relevance=args.min_relevance,
+            budget=CallBudget(limit=args.budget),
+        )
+        print(result.summary())
+        for statement in result.statements:
+            print(f"  + {statement}")
+        return 0
+
+    if args.facts_command == "add":
+        fact = facts_mod.add_fact(
+            args.statement, args.valid_from, settings, valid_until=args.valid_until
+        )
+        print(f"recorded fact {fact.id}: {fact.statement}")
+        return 0
+
+    rows = facts_mod.list_facts(settings, status=None if args.all else "open")
+    print(facts_mod.render_facts(rows))
+    return 0
+
+
+def _cmd_contradictions(args: argparse.Namespace) -> int:
+    from personalagi.contradictions import find_contradictions, render_conflicts
+    from personalagi.records import CallBudget
+
+    result = find_contradictions(
+        get_settings(), goal_slug=args.goal, budget=CallBudget(limit=args.budget)
+    )
+    print(render_conflicts(result))
+    return 0
+
+
 def _cmd_owed(args: argparse.Namespace) -> int:
     from personalagi.commitments import list_owed, refresh_stale, render_owed
 
@@ -1014,6 +1071,8 @@ def main(argv: list[str] | None = None) -> int:
         "feedback": _cmd_feedback,
         "proposals": _cmd_proposals,
         "investigate": _cmd_investigate,
+        "facts": _cmd_facts,
+        "contradictions": _cmd_contradictions,
         "owed": _cmd_owed,
         "done": _cmd_done,
         "labels-template": _cmd_labels_template,
