@@ -82,6 +82,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="re-project every message, not only those without an event",
     )
 
+    ims = sub.add_parser(
+        "imessage",
+        help="ingest iMessage as Events (read-only snapshot of chat.db)",
+    )
+    ims.add_argument("--days", type=int, default=90, help="how far back to read")
+    ims.add_argument("--limit", type=int, default=None)
+
     headers = sub.add_parser(
         "refresh-headers",
         help="backfill message headers (List-Unsubscribe etc) for existing mail",
@@ -297,6 +304,20 @@ def _cmd_sync_events(args: argparse.Namespace) -> int:
         rebuild=args.rebuild,
     )
     print(f"{events} event(s), {participants} participant(s)")
+    return 0
+
+
+def _cmd_imessage(args: argparse.Namespace) -> int:
+    from personalagi.adapters.imessage import IMessageUnavailable, sync_imessage
+
+    try:
+        result = sync_imessage(get_settings(), days=args.days, limit=args.limit)
+    except IMessageUnavailable as exc:
+        # Fail with a clear message and a non-zero code rather than a
+        # traceback: a missing permission is a setup problem, not a crash.
+        print(f"iMessage unavailable: {exc}")
+        return 2
+    print(result.summary())
     return 0
 
 
@@ -627,6 +648,7 @@ def main(argv: list[str] | None = None) -> int:
         "ingest": _cmd_ingest,
         "backfill": _cmd_backfill,
         "sync-events": _cmd_sync_events,
+        "imessage": _cmd_imessage,
         "refresh-headers": _cmd_refresh_headers,
         "classify": _cmd_classify,
         "relevance": _cmd_relevance,

@@ -60,6 +60,11 @@ class PersonFile:
     slug: str
     name: str
     emails: list[str] = field(default_factory=list)
+    # Phone numbers and other non-email handles, kept separate from `emails`
+    # because a phone number in a field called emails is a lie that later code
+    # will act on. Absent from files written before iMessage existed, which
+    # parses as [] — no migration needed.
+    phones: list[str] = field(default_factory=list)
     relationship: str = "unknown"
     current_threads: list[str] = field(default_factory=list)
     # Human-authored, authoritative, and never overwritten by compaction.
@@ -102,6 +107,7 @@ class PersonFile:
             "name": self.name,
             "slug": self.slug,
             "emails": sorted(self.emails),
+            "phones": sorted(self.phones),
             "relationship": self.relationship,
             "current_threads": self.current_threads,
             "corrections": self.corrections,
@@ -161,6 +167,7 @@ def parse_markdown(text: str, slug_hint: str = "") -> PersonFile:
         "name",
         "slug",
         "emails",
+        "phones",
         "relationship",
         "current_threads",
         "corrections",
@@ -173,6 +180,7 @@ def parse_markdown(text: str, slug_hint: str = "") -> PersonFile:
         slug=str(meta.get("slug") or slug_hint or slugify(str(meta.get("name", "")))),
         name=str(meta.get("name", "")),
         emails=list(meta.get("emails") or []),
+        phones=list(meta.get("phones") or []),
         relationship=str(meta.get("relationship", "unknown")),
         current_threads=list(meta.get("current_threads") or []),
         corrections=list(meta.get("corrections") or []),

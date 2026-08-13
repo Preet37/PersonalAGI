@@ -149,17 +149,21 @@ def build_people(
 
         grouped.setdefault(slug, []).append((view, classification))
 
-        name, emails = identities.setdefault(
+        name, addresses = identities.setdefault(
             slug, (sender.display_name or sender.address, set())
         )
         if sender.address:
-            emails.add(sender.address)
+            addresses.add(sender.address)
 
     for slug, items in grouped.items():
-        name, emails = identities[slug]
+        name, addresses = identities[slug]
         person = load_person(root, slug) or PersonFile(slug=slug, name=name)
         person.name = person.name or name
-        person.emails = sorted(set(person.emails) | emails)
+        # One person, several handles. Routed by shape so a phone number never
+        # ends up in a field called `emails` — this is the merge point where
+        # a Gmail address and an iMessage number become one file.
+        person.emails = sorted(set(person.emails) | {a for a in addresses if "@" in a})
+        person.phones = sorted(set(person.phones) | {a for a in addresses if "@" not in a})
 
         added = 0
         for view, classification in items:
