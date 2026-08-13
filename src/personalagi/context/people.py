@@ -48,10 +48,10 @@ _SLUG_STRIP_RE = re.compile(r"[^a-z0-9]+")
 class LogEntry:
     entry_date: date
     text: str
-    gmail_id: str = ""
+    source_id: str = ""
 
     def render(self) -> str:
-        anchor = f" [g:{self.gmail_id}]" if self.gmail_id else ""
+        anchor = f" [g:{self.source_id}]" if self.source_id else ""
         return f"- {self.entry_date.isoformat()} — {self.text}{anchor}"
 
 
@@ -79,23 +79,23 @@ class PersonFile:
     def last_seen(self) -> date | None:
         return max((e.entry_date for e in self.log), default=None)
 
-    def known_gmail_ids(self) -> set[str]:
-        return {e.gmail_id for e in self.log if e.gmail_id}
+    def known_source_ids(self) -> set[str]:
+        return {e.source_id for e in self.log if e.source_id}
 
     def add_entry(self, entry: LogEntry) -> bool:
         """Append if new. Returns True when something was actually added.
 
-        Idempotent on the gmail_id anchor, so re-running the builder over the
+        Idempotent on the source_id anchor, so re-running the builder over the
         same mail does not duplicate history.
         """
-        if entry.gmail_id and entry.gmail_id in self.known_gmail_ids():
+        if entry.source_id and entry.source_id in self.known_source_ids():
             return False
         self.log.append(entry)
         return True
 
     def sorted_log(self) -> list[LogEntry]:
         """Newest first — the order you actually read a history in."""
-        return sorted(self.log, key=lambda e: (e.entry_date, e.gmail_id), reverse=True)
+        return sorted(self.log, key=lambda e: (e.entry_date, e.source_id), reverse=True)
 
     def to_markdown(self) -> str:
         meta = {
@@ -205,7 +205,7 @@ def _split_body(body: str) -> tuple[str, list[LogEntry]]:
                     LogEntry(
                         entry_date=date.fromisoformat(match.group("date")),
                         text=match.group("text").strip(),
-                        gmail_id=(match.group("gid") or "").strip(),
+                        source_id=(match.group("gid") or "").strip(),
                     )
                 )
 

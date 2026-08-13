@@ -12,10 +12,11 @@ import pytest
 from sqlmodel import Session
 
 from personalagi import db as db_module
+from personalagi.adapters.base import resolve_participant
 from personalagi.config import Settings
 from personalagi.evals.harness import EvalError, generate_template, read_labels
 from personalagi.identity import is_human_sender, looks_automated, shared_addresses
-from personalagi.models import Classification, Message
+from personalagi.models import Classification, Event, Participant
 
 BASE = datetime(2026, 8, 1, 9, 0)
 
@@ -28,27 +29,39 @@ def settings(tmp_path):
 
 
 def seed(settings, rows: list[tuple[str, str, str]]) -> None:
-    """rows: (sender_email, sender_name, predicted_category)."""
+    """rows: (sender_email, sender_name, predicted_category).
+
+    Seeds Events and Participants — the canonical shape — and resolves each
+    sender through the real adapter path, so these tests exercise the same
+    automated/human verdict the pipeline uses rather than a parallel one.
+    """
     engine = db_module.init_db(settings)
     with Session(engine) as session:
+        shared = shared_addresses((e, n) for e, n, _ in rows)
         for i, (email, name, category) in enumerate(rows):
-            message = Message(
-                gmail_id=f"g{i}",
-                thread_id=f"t{i}",
+            event = Event(
+                source="gmail",
+                source_id=f"g{i}",
                 account_label="personal",
-                sender_name=name,
-                sender_email=email,
-                subject=f"subject {i}",
-                body_text=f"body {i}",
+                thread_key=f"t{i}",
+                title=f"subject {i}",
+                text=f"body {i}",
                 timestamp=BASE + timedelta(minutes=i),
-                internal_date_ms=1_786_000_000_000 + i * 60_000,
+                timestamp_ms=1_786_000_000_000 + i * 60_000,
                 ingested_at=BASE,
             )
-            session.add(message)
+            session.add(event)
             session.flush()
+            resolved = resolve_participant(email, name, shared=shared)
+            session.add(
+                Participant(event_id=event.id, **{
+                    k: v for k, v in resolved.as_row(event.id).items()
+                    if k != "event_id"
+                })
+            )
             session.add(
                 Classification(
-                    message_id=message.id,
+                    event_id=event.id,
                     category=category,
                     urgency="low",
                     summary="",

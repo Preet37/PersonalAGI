@@ -6,6 +6,7 @@ Everything under data/ is derived — deleting it and reindexing is always safe.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -15,6 +16,8 @@ from sqlmodel import Session, SQLModel, create_engine
 
 from personalagi import models  # noqa: F401  (registers tables on SQLModel.metadata)
 from personalagi.config import Settings, get_settings
+
+log = logging.getLogger(__name__)
 
 _engine: Engine | None = None
 
@@ -90,8 +93,51 @@ def _add_missing_columns(engine: Engine) -> list[str]:
     return added
 
 
+# Stage 8: the three derived tables keyed on message_id now key on event_id.
+# Event ids are assigned equal to the Message ids they derive from, so this is
+# a pure rename — every existing foreign key stays valid and no row is
+# rewritten. SQLite updates dependent indexes as part of RENAME COLUMN.
+_COLUMN_RENAMES: tuple[tuple[str, str, str], ...] = (
+    ("classification", "message_id", "event_id"),
+    ("relevance", "message_id", "event_id"),
+    ("commitment", "message_id", "event_id"),
+)
+
+
+def _rename_columns(engine: Engine) -> list[str]:
+    """Apply renames to tables that predate them. Idempotent."""
+    renamed: list[str] = []
+    with engine.begin() as conn:
+        for table, old, new in _COLUMN_RENAMES:
+            exists = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=:n",
+                {"n": table},
+            ).fetchone()
+            if not exists:
+                continue
+            columns = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            }
+            # Only when the old name is present and the new one is not: running
+            # this against an already-migrated table must be a no-op, not an
+            # error, because init_db runs on every single command.
+            if old in columns and new not in columns:
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}"
+                )
+                renamed.append(f"{table}.{old}->{new}")
+    if renamed:
+        log.info("migrated columns: %s", ", ".join(renamed))
+    return renamed
+
+
 def init_db(settings: Settings | None = None) -> Engine:
     engine = get_engine(settings)
+    # Rename BEFORE create_all: otherwise create_all sees a table missing
+    # event_id, _add_missing_columns adds an empty one, and the rename then
+    # finds both names present and silently does nothing — leaving every
+    # foreign key NULL.
+    _rename_columns(engine)
     SQLModel.metadata.create_all(engine)
     _add_missing_columns(engine)
     return engine

@@ -27,7 +27,7 @@ from sqlmodel import Session
 
 from personalagi.config import Settings, get_settings
 from personalagi.db import get_engine, init_db
-from personalagi.models import Commitment, Message
+from personalagi.models import Commitment, Event
 
 log = logging.getLogger(__name__)
 
@@ -174,17 +174,17 @@ def render_owed(groups: list[PersonOwed], *, direction: str = "i_owe") -> str:
     return "\n".join(lines)
 
 
-def messages_for(
+def events_for(
     commitment_ids: list[int], settings: Settings | None = None
-) -> dict[int, Message]:
-    """Source message per commitment, so a claim can always be traced back."""
+) -> dict[int, Event]:
+    """Source event per commitment, so a claim can always be traced back."""
     settings = settings or get_settings()
     with Session(get_engine(settings)) as session:
         rows = list(
             session.execute(
-                select(Commitment.id, Message)
-                .join(Message, Message.id == Commitment.message_id)
+                select(Commitment.id, Event)
+                .join(Event, Event.id == Commitment.event_id)
                 .where(Commitment.id.in_(commitment_ids))
             )
         )
-    return {cid: message for cid, message in rows}
+    return {cid: event for cid, event in rows}

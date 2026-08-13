@@ -30,7 +30,6 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from email.utils import getaddresses
 
 from pydantic import ValidationError
 from sqlalchemy import select
@@ -38,14 +37,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session
 
 from personalagi.config import Settings, get_settings
-from personalagi.context.people import slug_for
 from personalagi.context.retrieve import get_context
 from personalagi.db import get_engine, init_db
-from personalagi.identity import classify_sender, shared_addresses
+from personalagi.events import EventView, load_views, pending_events
 from personalagi.llm.client import GroqClient, LLMError
 from personalagi.llm.prompts import load_prompt
 from personalagi.llm.schemas import RelevanceOut
-from personalagi.models import Commitment, Message, Relevance
+from personalagi.models import Commitment, Relevance
 
 log = logging.getLogger(__name__)
 
@@ -120,52 +118,6 @@ def what_hash(text: str) -> str:
     return hashlib.sha256(" ".join((text or "").lower().split()).encode()).hexdigest()[:16]
 
 
-def _headers_of(message: Message) -> dict[str, str]:
-    if not message.headers_json:
-        return {}
-    try:
-        loaded = json.loads(message.headers_json)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _recipients_of(message: Message) -> str:
-    headers = _headers_of(message)
-    to = headers.get("to", "")
-    cc = headers.get("cc", "")
-    joined = ", ".join(p for p in (to, cc) if p)
-    return joined[:300] or "(unknown)"
-
-
-def counterparty(
-    message: Message, owner_addresses: set[str]
-) -> tuple[str, str]:
-    """Who the commitment is WITH. Returns (name, email).
-
-    Not the sender. On mail the owner sent, the sender IS the owner, and using
-    it produces "Preet Karia owes Preet Karia" — which is what the first real
-    run of `owed` reported for all three commitments it found.
-
-    The counterparty is the other end of the conversation: the sender on
-    received mail, and the first non-owner recipient on sent mail.
-    """
-    if (message.sender_email or "").strip().lower() not in owner_addresses:
-        return message.sender_name or "", message.sender_email or ""
-
-    headers = _headers_of(message)
-    for field_name in ("to", "cc"):
-        for name, address in getaddresses([headers.get(field_name, "")]):
-            address = (address or "").strip().lower()
-            if address and address not in owner_addresses:
-                return (name or "").strip().strip('"'), address
-
-    # Sent mail with no other recipient we can see — a note to self, or the
-    # To header was never fetched. Attributing it to the owner would be wrong,
-    # so it is left blank and groups under "(unknown)" rather than lying.
-    return "", ""
-
-
 def direction_for(promiser: str, sent_by_owner: bool) -> str:
     """Map "who promised, in this message" onto "who owes the owner".
 
@@ -186,34 +138,25 @@ def direction_for(promiser: str, sent_by_owner: bool) -> str:
     return "i_owe" if author_owes else "they_owe"
 
 
-def owner_sent(message: Message, owner_addresses: set[str]) -> bool:
-    """True when the owner is the SENDER of this message.
-
-    Commitment direction inverts on this. The model is told which side the
-    owner is on rather than being asked to work it out, because it is a
-    lookup, and asking a model to do a lookup is how you get it wrong 5% of
-    the time for no reason.
-    """
-    return (message.sender_email or "").strip().lower() in owner_addresses
-
-
-def render_context(message: Message, settings: Settings) -> tuple[str, str, int]:
+def render_context(view: EventView, settings: Settings) -> tuple[str, str, int]:
     """Retrieve the sender's stored context. Returns (text, slug, tokens).
 
-    The query is the message subject, so FTS returns the log lines related to
+    The query is the event title, so FTS returns the log lines related to
     *this* thread rather than the person's most recent activity in general.
     """
-    slug = slug_for(message.sender_name, message.sender_email)
+    slug = view.person_slug or view.sender_address
+    if not slug:
+        return NO_CONTEXT, "", 0
     try:
         found = get_context(
             slug,
-            query=message.subject or "",
+            query=view.event.title or "",
             settings=settings,
             k=CONTEXT_LOG_LINES,
-            # Without this the message retrieves itself: context-build already
+            # Without this the event retrieves itself: context-build already
             # folded it into this person's log, so it comes back as a "prior"
             # entry corroborating its own importance.
-            exclude_gmail_ids={message.gmail_id} if message.gmail_id else None,
+            exclude_source_ids={view.event.source_id} if view.event.source_id else None,
         )
     except LookupError:
         # Ambiguous match. Treated as no context rather than guessing which
@@ -236,7 +179,7 @@ def render_context(message: Message, settings: Settings) -> tuple[str, str, int]
 def score_one(
     client: GroqClient,
     prompt,
-    message: Message,
+    view: EventView,
     context_text: str,
     owner_label: str,
     owner_profile: str,
@@ -244,7 +187,7 @@ def score_one(
     max_attempts: int = 2,
 ) -> tuple[RelevanceOut | None, str | None]:
     """One Stage B call. Returns (result, error)."""
-    body = (message.body_text or "").strip()
+    body = (view.event.text or "").strip()
     if len(body) > BODY_CHAR_LIMIT:
         body = body[:BODY_CHAR_LIMIT] + "\n[...truncated]"
 
@@ -252,11 +195,11 @@ def score_one(
         owner=owner_label,
         owner_profile=owner_profile,
         context=context_text,
-        sender_name=message.sender_name or "(unknown)",
-        sender_email=message.sender_email or "(unknown)",
-        recipients=_recipients_of(message),
-        date=message.timestamp.isoformat(sep=" ", timespec="minutes"),
-        subject=message.subject or "(no subject)",
+        sender_name=view.sender_name or "(unknown)",
+        sender_email=view.sender_address or "(unknown)",
+        recipients=view.recipients_line(),
+        date=view.event.timestamp.isoformat(sep=" ", timespec="minutes"),
+        subject=view.event.title or "(no subject)",
         body=body or "(empty body)",
     )
 
@@ -287,7 +230,7 @@ def _upsert_relevance(session: Session, rows: list[dict]) -> None:
         chunk = rows[start : start + 60]
         stmt = sqlite_insert(Relevance).values(chunk)
         stmt = stmt.on_conflict_do_update(
-            index_elements=["message_id"],
+            index_elements=["event_id"],
             set_={
                 k: getattr(stmt.excluded, k)
                 for k in (
@@ -313,7 +256,7 @@ def _upsert_commitments(session: Session, rows: list[dict]) -> int:
         # commitment the owner already marked done. The message text has not
         # changed, so there is nothing new to learn from it anyway.
         stmt = stmt.on_conflict_do_nothing(
-            index_elements=["message_id", "direction", "what_hash"]
+            index_elements=["event_id", "direction", "what_hash"]
         )
         written += session.execute(stmt).rowcount or 0
     session.commit()
@@ -345,56 +288,47 @@ def score_messages(
     result = RelevanceResult()
 
     with Session(get_engine(settings)) as session:
-        stmt = select(Message)
-        if account:
-            stmt = stmt.where(Message.account_label == account)
-        if not rescore:
-            stmt = stmt.where(Message.id.not_in(select(Relevance.message_id)))
-        stmt = stmt.order_by(Message.internal_date_ms.desc())
-        if limit:
-            stmt = stmt.limit(limit)
-        messages = list(session.execute(stmt).scalars())
-
-        # Shared-envelope detection needs the whole corpus, not this batch:
-        # a bulk address only reveals itself across many messages.
-        all_pairs = list(
-            session.execute(select(Message.sender_email, Message.sender_name))
+        stmt = pending_events(
+            account=account,
+            exclude_scored=None if rescore else select(Relevance.event_id),
+            limit=limit,
         )
+        messages = load_views(session, stmt)
 
     result.considered = len(messages)
     if not messages:
         result.usage_summary = "no messages to score"
         return result
 
-    shared = shared_addresses(all_pairs)
-
     # --- Stage A: structural, free -------------------------------------
     now = datetime.now(UTC).replace(tzinfo=None)
     automated_rows: list[dict] = []
-    human: list[tuple[Message, object]] = []
+    human: list[EventView] = []
 
-    for message in messages:
-        verdict = classify_sender(message.sender_email, _headers_of(message), shared)
-        if verdict.is_human:
+    for view in messages:
+        # Stage A is now a read, not a computation: the adapter already
+        # resolved every participant when the Event was created, so the same
+        # rules apply to iMessage handles and calendar organisers for free.
+        sender = view.sender
+        if sender is not None and not sender.is_automated:
             result.stage_a_human += 1
-            if verdict.needs_llm:
-                result.stage_a_uncertain += 1
-            human.append((message, verdict))
+            human.append(view)
             continue
 
         result.stage_a_automated += 1
+        reason = sender.automated_reason if sender else "no sender participant"
         # Machine mail gets a score of 0 written WITHOUT an LLM call. Storing
         # it rather than leaving it absent is what makes "scored" and
         # "considered" reconcile, and keeps the filter auditable.
         automated_rows.append(
             {
-                "message_id": message.id,
+                "event_id": view.event.id,
                 "score": 0,
-                "why": f"stage A: {verdict.reason}",
+                "why": f"stage A: {reason}",
                 "person_slug": "",
                 "context_tokens": 0,
                 "sender_kind": "automated",
-                "sender_reason": verdict.reason,
+                "sender_reason": reason,
                 "model": "",
                 "prompt_version": "",
                 "ok": True,
@@ -436,18 +370,18 @@ def score_messages(
         prompt.version,
     )
 
-    def work(item):
-        message, verdict = item
-        context_text, slug, tokens = render_context(message, settings)
+    def work(view: EventView):
+        context_text, slug, tokens = render_context(view, settings)
         parsed, error = score_one(
-            client, prompt, message, context_text, owner_label, owner_profile
+            client, prompt, view, context_text, owner_label, owner_profile
         )
+        sender = view.sender
         base = {
-            "message_id": message.id,
+            "event_id": view.event.id,
             "person_slug": slug,
             "context_tokens": tokens,
             "sender_kind": "human",
-            "sender_reason": verdict.reason,
+            "sender_reason": sender.automated_reason if sender else "",
             "model": client.model,
             "prompt_version": prompt.version,
             "scored_at": now,
@@ -458,27 +392,30 @@ def score_messages(
                 [],
             )
 
-        sent_by_owner = owner_sent(message, owner_addresses)
-        other_name, other_email = counterparty(message, owner_addresses)
-        # The person file is keyed on the counterparty too, so a promise made
-        # in sent mail files under the person it was made TO.
-        other_slug = slug_for(other_name, other_email) if other_email else ""
+        sent_by_owner = view.sent_by_owner
+        # The counterparty is the other end of the conversation, resolved on
+        # the Event. Using the sender would report that the owner owes
+        # themselves for every promise made in their own sent mail.
+        other = view.counterparty
+        other_name = other.display_name if other else ""
+        other_email = other.address if other else ""
+        other_slug = (other.person_slug if other else "") or ""
         commitments = []
         for item_out in parsed.commitments:
             # A quote that is not actually in the body means the model wrote
             # the evidence itself, which is the one failure mode that makes
             # this feature worse than useless. Drop it.
-            if not _quote_is_grounded(item_out.quote, message.body_text):
+            if not _quote_is_grounded(item_out.quote, view.event.text):
                 log.debug(
-                    "dropping ungrounded commitment on message %s: %r",
-                    message.gmail_id,
+                    "dropping ungrounded commitment on event %s: %r",
+                    view.event.source_id,
                     item_out.quote[:80],
                 )
                 continue
             direction = direction_for(item_out.promiser, sent_by_owner)
             commitments.append(
                 {
-                    "message_id": message.id,
+                    "event_id": view.event.id,
                     "direction": direction,
                     "person_slug": other_slug,
                     "person_name": other_name,
@@ -488,7 +425,7 @@ def score_messages(
                     "quote": item_out.quote,
                     "due_text": item_out.due_text,
                     "status": "open",
-                    "promised_at": message.timestamp,
+                    "promised_at": view.event.timestamp,
                     "manually_closed": False,
                     "model": client.model,
                     "prompt_version": prompt.version,

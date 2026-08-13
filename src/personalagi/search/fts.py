@@ -28,7 +28,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS {TABLE} USING fts5(
     person_slug UNINDEXED,
     person_name UNINDEXED,
     entry_date  UNINDEXED,
-    gmail_id    UNINDEXED,
+    source_id    UNINDEXED,
     tokenize = "porter unicode61"
 )
 """
@@ -44,16 +44,35 @@ class SearchHit:
     person_name: str
     entry_date: str
     body: str
-    gmail_id: str
+    source_id: str
     rank: float
 
     def render(self) -> str:
-        anchor = f" [g:{self.gmail_id}]" if self.gmail_id else ""
+        anchor = f" [g:{self.source_id}]" if self.source_id else ""
         return f"- {self.entry_date} — {self.body}{anchor}"
 
 
+# Bumped whenever the FTS column list changes. `CREATE VIRTUAL TABLE IF NOT
+# EXISTS` silently keeps an old table with the old columns, so a rename lands
+# as "no such column" at INSERT time — long after the change looked fine.
+FTS_COLUMNS = ("body", "person_slug", "person_name", "entry_date", "source_id")
+
+
 def ensure_fts(engine: Engine) -> None:
+    """Create the index, rebuilding it if its columns are out of date.
+
+    Dropping is safe by construction: the index is derived from the markdown
+    vault (D2), so the recovery story is always "delete it and reindex". The
+    caller is expected to reindex after a rebuild — `reindex` does both.
+    """
     with engine.begin() as conn:
+        existing = conn.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=:n",
+            {"n": TABLE},
+        ).fetchone()
+        if existing and any(column not in existing[0] for column in FTS_COLUMNS):
+            log.info("%s has stale columns; rebuilding the index", TABLE)
+            conn.exec_driver_sql(f"DROP TABLE {TABLE}")
         conn.execute(text(CREATE_SQL))
 
 
@@ -82,7 +101,7 @@ def reindex(engine: Engine, context_dir: Path) -> int:
                 conn.execute(
                     text(
                         f"INSERT INTO {TABLE} "
-                        "(body, person_slug, person_name, entry_date, gmail_id) "
+                        "(body, person_slug, person_name, entry_date, source_id) "
                         "VALUES (:body, :slug, :name, :date, :gid)"
                     ),
                     {
@@ -90,7 +109,7 @@ def reindex(engine: Engine, context_dir: Path) -> int:
                         "slug": person.slug,
                         "name": person.name,
                         "date": entry.entry_date.isoformat(),
-                        "gid": entry.gmail_id,
+                        "gid": entry.source_id,
                     },
                 )
                 rows += 1
@@ -112,7 +131,7 @@ def search(
 
     ensure_fts(engine)
     sql = (
-        f"SELECT body, person_slug, person_name, entry_date, gmail_id, rank "
+        f"SELECT body, person_slug, person_name, entry_date, source_id, rank "
         f"FROM {TABLE} WHERE {TABLE} MATCH :match"
     )
     params: dict[str, object] = {"match": match, "limit": limit}
@@ -129,7 +148,7 @@ def search(
                 person_slug=row[1],
                 person_name=row[2],
                 entry_date=row[3],
-                gmail_id=row[4],
+                source_id=row[4],
                 rank=float(row[5]),
             )
             for row in result

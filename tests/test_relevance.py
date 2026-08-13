@@ -119,32 +119,26 @@ class TestCounterparty:
 
     OWNER = {"preet@example.com"}
 
-    def message(self, sender: str, to: str = "", cc: str = ""):
-        import json
+    def view(self, sender: str, to=(), cc=()):
+        from tests.factories import make_view
 
-        from personalagi.models import Message
-
-        return Message(
-            gmail_id="g",
-            thread_id="t",
-            account_label="personal",
-            sender_name="Someone",
-            sender_email=sender,
-            subject="s",
-            body_text="b",
-            timestamp=datetime(2026, 8, 13),
-            internal_date_ms=1,
-            ingested_at=datetime(2026, 8, 13),
-            headers_json=json.dumps({"to": to, "cc": cc}),
+        return make_view(
+            sender="Someone",
+            email=sender,
+            to=list(to),
+            cc=list(cc),
+            owner_addresses=self.OWNER,
         )
+
+    @staticmethod
+    def resolve(view):
+        other = view.counterparty
+        return (other.display_name if other else "", other.address if other else "")
 
     def test_on_received_mail_it_is_the_sender(self):
-        from personalagi.llm.relevance import counterparty
+        view = self.view("karan@example.com", to=[("", "preet@example.com")])
 
-        _, email = counterparty(
-            self.message("karan@example.com", to="preet@example.com"), self.OWNER
-        )
-        assert email == "karan@example.com"
+        assert self.resolve(view)[1] == "karan@example.com"
 
     def test_on_sent_mail_it_is_the_recipient_not_the_owner(self):
         """The bug the first real `owed` run exposed.
@@ -153,45 +147,34 @@ class TestCounterparty:
         Karia", because the extractor took sender_email unconditionally and on
         sent mail the sender is the owner.
         """
-        from personalagi.llm.relevance import counterparty
-
-        name, email = counterparty(
-            self.message("preet@example.com", to="Karan G <karan@example.com>"),
-            self.OWNER,
-        )
+        view = self.view("preet@example.com", to=[("Karan G", "karan@example.com")])
+        name, email = self.resolve(view)
 
         assert email == "karan@example.com"
         assert name == "Karan G"
 
     def test_the_owner_is_skipped_when_they_are_also_a_recipient(self):
-        from personalagi.llm.relevance import counterparty
-
-        _, email = counterparty(
-            self.message(
-                "preet@example.com", to="preet@example.com, daniel@example.com"
-            ),
-            self.OWNER,
+        view = self.view(
+            "preet@example.com",
+            to=[("", "preet@example.com"), ("", "daniel@example.com")],
         )
-        assert email == "daniel@example.com"
+
+        assert self.resolve(view)[1] == "daniel@example.com"
 
     def test_it_falls_back_to_cc(self):
-        from personalagi.llm.relevance import counterparty
-
-        _, email = counterparty(
-            self.message("preet@example.com", to="preet@example.com", cc="sisi@x.com"),
-            self.OWNER,
+        view = self.view(
+            "preet@example.com",
+            to=[("", "preet@example.com")],
+            cc=[("", "sisi@x.com")],
         )
-        assert email == "sisi@x.com"
+
+        assert self.resolve(view)[1] == "sisi@x.com"
 
     def test_a_note_to_self_yields_nobody_rather_than_the_owner(self):
         """Blank is honest; attributing it to the owner is a false claim."""
-        from personalagi.llm.relevance import counterparty
+        view = self.view("preet@example.com", to=[("", "preet@example.com")])
 
-        name, email = counterparty(
-            self.message("preet@example.com", to="preet@example.com"), self.OWNER
-        )
-
-        assert (name, email) == ("", "")
+        assert self.resolve(view) == ("", "")
 
 
 class TestQuoteGrounding:
@@ -288,7 +271,7 @@ class TestSelfCitation:
             "decommission",
             settings,
             context_dir=context_dir,
-            exclude_gmail_ids={"abc123"},
+            exclude_source_ids={"abc123"},
         )
 
         assert with_self.total_log_lines == 1

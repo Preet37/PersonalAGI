@@ -48,20 +48,106 @@ class Message(SQLModel, table=True):
     ingested_at: datetime
 
 
+class Event(SQLModel, table=True):
+    """The canonical record every source normalizes to (ARCHITECTURE.md D1).
+
+    `{id, source, timestamp, participants[], text, metadata{}}`.
+
+    Message above is now a Gmail-specific landing zone: raw, source-shaped,
+    and read by exactly one adapter. Everything downstream — context building,
+    classification, relevance, commitments, the brief — reads Events and knows
+    nothing about senders, subjects, or threads.
+
+    Event ids are deliberately assigned equal to the Message id they derive
+    from. The three derived tables already carried a message_id foreign key
+    over thousands of rows; making the ids identical turns a data migration
+    with a remapping table into a column rename, and there is no window in
+    which a foreign key points at the wrong row.
+    """
+
+    __tablename__ = "event"
+    __table_args__ = (
+        UniqueConstraint("source", "account_label", "source_id", name="uq_event_source"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    # "gmail" | "imessage" | "calendar". The only place a source name appears
+    # below the adapter layer, and only ever for display or filtering.
+    source: str = Field(index=True)
+    # The source's own identifier: gmail_id, iMessage GUID, calendar event id.
+    source_id: str = Field(index=True)
+    # Which inbox/account/device this arrived through.
+    account_label: str = Field(default="", index=True)
+    # Groups events into a conversation within one source.
+    thread_key: str = Field(default="", index=True)
+
+    # Subject, calendar event title, or "" for sources that have no title
+    # (an iMessage has no subject, and inventing one would be a lie).
+    title: str = ""
+    text: str = ""
+
+    timestamp: datetime = Field(index=True)
+    timestamp_ms: int = Field(index=True)
+
+    # Source-specific structure the common shape cannot hold: mail headers,
+    # calendar recurrence, iMessage service. D1's stated mitigation for
+    # lowest-common-denominator loss.
+    metadata_json: str | None = None
+    ingested_at: datetime
+
+
+class Participant(SQLModel, table=True):
+    """Someone on an event: sender, recipient, attendee, or chat member.
+
+    A separate table rather than a JSON list on Event because "every event
+    involving this address" is the central query of a context system, and that
+    has to be an index, not a scan.
+
+    The automated/owner flags are resolved once here at adapter time. That is
+    what makes the 215-display-names rule and the robot-address filter apply to
+    every source for free instead of being reimplemented per pipeline.
+    """
+
+    __tablename__ = "participant"
+    __table_args__ = (
+        UniqueConstraint("event_id", "address", "role", name="uq_participant_event"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    event_id: int = Field(foreign_key="event.id", index=True)
+
+    # Email address, phone number, or handle — whatever identifies this person
+    # within the source. Normalized lowercase.
+    address: str = Field(default="", index=True)
+    display_name: str = ""
+    # "from" | "to" | "cc" | "attendee"
+    role: str = Field(default="from", index=True)
+
+    is_owner: bool = Field(default=False, index=True)
+    is_automated: bool = Field(default=False, index=True)
+    # Why is_automated was set, so a filtered-out human is diagnosable.
+    automated_reason: str = ""
+
+    # Resolved person-file slug, or "" when the participant is a shared bulk
+    # envelope that must never be attached to a person.
+    person_slug: str = Field(default="", index=True)
+
+
 class Classification(SQLModel, table=True):
     """One classification per message.
 
-    Unique on message_id so re-classifying updates in place rather than
+    Unique on event_id so re-classifying updates in place rather than
     accumulating rows. `prompt_version` and `model` are stored on every row
     because an eval number is meaningless without knowing which prompt and
     model produced it.
     """
 
     __tablename__ = "classification"
-    __table_args__ = (UniqueConstraint("message_id", name="uq_classification_message"),)
+    __table_args__ = (UniqueConstraint("event_id", name="uq_classification_event"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    message_id: int = Field(foreign_key="message.id", index=True)
+    event_id: int = Field(foreign_key="event.id", index=True)
 
     # needs_response | fyi | promotional | spam | unclassified
     category: str = Field(index=True)
@@ -90,10 +176,10 @@ class Relevance(SQLModel, table=True):
     """
 
     __tablename__ = "relevance"
-    __table_args__ = (UniqueConstraint("message_id", name="uq_relevance_message"),)
+    __table_args__ = (UniqueConstraint("event_id", name="uq_relevance_event"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    message_id: int = Field(foreign_key="message.id", index=True)
+    event_id: int = Field(foreign_key="event.id", index=True)
 
     # 0 bulk-no-connection, 1 unknown-but-plausible, 2 known-person,
     # 3 touches an open commitment or a tracked person. See evals/TAXONOMY.md.
@@ -124,7 +210,7 @@ class Commitment(SQLModel, table=True):
     The actual product. Triage tells you what arrived; this tells you what you
     said you would do and have not done.
 
-    Unique on (message_id, direction, what_hash) so re-extracting the same
+    Unique on (event_id, direction, what_hash) so re-extracting the same
     message does not duplicate a commitment, while still allowing one message
     to create several ("I'll send the deck and introduce you to Sam").
     """
@@ -132,12 +218,12 @@ class Commitment(SQLModel, table=True):
     __tablename__ = "commitment"
     __table_args__ = (
         UniqueConstraint(
-            "message_id", "direction", "what_hash", name="uq_commitment_dedup"
+            "event_id", "direction", "what_hash", name="uq_commitment_dedup"
         ),
     )
 
     id: int | None = Field(default=None, primary_key=True)
-    message_id: int = Field(foreign_key="message.id", index=True)
+    event_id: int = Field(foreign_key="event.id", index=True)
 
     # "i_owe" — the owner promised someone something.
     # "they_owe" — someone promised the owner something.

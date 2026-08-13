@@ -4,14 +4,13 @@ No network. classify_one takes a client, so a fake one exercises every path
 including the ones a real API would only produce intermittently.
 """
 
-from datetime import datetime
 
 import pytest
 
 from personalagi.llm import classify as classify_module
 from personalagi.llm.prompts import Prompt, PromptError, load_prompt
 from personalagi.llm.schemas import ClassificationOut
-from personalagi.models import Message
+from tests.factories import make_view
 
 
 class FakeClient:
@@ -42,18 +41,12 @@ def prompt():
 
 @pytest.fixture
 def message():
-    return Message(
-        id=1,
-        gmail_id="g1",
-        thread_id="t1",
-        account_label="personal",
-        sender_name="Dana Okafor",
-        sender_email="dana@example.com",
-        subject="Benchmark v2",
-        body_text="Can you send the harness draft by the 24th?",
-        timestamp=datetime(2026, 8, 10, 9, 20),
-        internal_date_ms=1786353600000,
-        ingested_at=datetime(2026, 8, 12),
+    return make_view(
+        eid=1,
+        sender="Dana Okafor",
+        email="dana@example.com",
+        title="Benchmark v2",
+        text="Can you send the harness draft by the 24th?",
     )
 
 
@@ -106,14 +99,14 @@ class TestClassifyOne:
         assert "category" in error
 
     def test_body_is_truncated(self, prompt, message):
-        message.body_text = "x" * 5000
+        message.event.text = "x" * 5000
         rendered = classify_module.render_message(message)
 
         assert len(rendered["body"]) < 2000
         assert rendered["body"].endswith("[...truncated]")
 
     def test_empty_body_does_not_render_blank(self, prompt, message):
-        message.body_text = ""
+        message.event.text = ""
         assert classify_module.render_message(message)["body"] == "(empty body)"
 
 

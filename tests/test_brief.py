@@ -5,7 +5,8 @@ from datetime import date, datetime
 import pytest
 
 from personalagi.brief import Brief, BriefItem, render_brief
-from personalagi.models import Classification, Message
+from personalagi.models import Classification
+from tests.factories import make_view
 
 
 def make(
@@ -21,17 +22,14 @@ def make(
     ms=1_786_353_600_000,
     ok=True,
 ):
-    message = Message(
-        id=mid, gmail_id=f"g{mid}", thread_id="t", account_label=account,
-        sender_name=sender, sender_email=email, subject=subject, body_text="b",
-        timestamp=datetime.fromtimestamp(ms / 1000), internal_date_ms=ms,
-        ingested_at=datetime(2026, 8, 13),
+    view = make_view(
+        eid=mid, account=account, sender=sender, email=email, title=subject, ms=ms
     )
     classification = Classification(
-        message_id=mid, category=category, urgency=urgency, summary=summary,
+        event_id=mid, category=category, urgency=urgency, summary=summary,
         ok=ok, classified_at=datetime(2026, 8, 13),
     )
-    return BriefItem(message, classification)
+    return BriefItem(view, classification)
 
 
 class TestOrdering:
@@ -50,7 +48,7 @@ class TestOrdering:
             make(mid=2, urgency="high", ms=9_000),
         ]
         items.sort(key=lambda i: i.sort_key)
-        assert items[0].message.id == 2
+        assert items[0].view.event.id == 2
 
     def test_unknown_urgency_sorts_last_without_crashing(self):
         items = [make(mid=1, urgency="bogus"), make(mid=2, urgency="low")]

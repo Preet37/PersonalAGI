@@ -82,7 +82,7 @@ class TestRoundTrip:
         assert loaded.relationship == original.relationship
         assert loaded.profile == original.profile
         assert len(loaded.log) == 3
-        assert {e.gmail_id for e in loaded.log} == {"g1", "g2", "g3"}
+        assert {e.source_id for e in loaded.log} == {"g1", "g2", "g3"}
 
     def test_log_is_rendered_newest_first(self, vault):
         save_person(vault, dana())
@@ -113,11 +113,11 @@ class TestRoundTrip:
         text = "---\nname: X\nslug: x\n---\n\n## Log\n\n- 2026-01-01 — hand written note\n"
         parsed = parse_markdown(text)
         assert parsed.log[0].text == "hand written note"
-        assert parsed.log[0].gmail_id == ""
+        assert parsed.log[0].source_id == ""
 
 
 class TestIdempotentAppend:
-    def test_same_gmail_id_is_not_appended_twice(self):
+    def test_same_source_id_is_not_appended_twice(self):
         person = dana()
         added = person.add_entry(LogEntry(date(2026, 8, 10), "different text", "g1"))
         assert added is False
@@ -173,17 +173,15 @@ class TestAutomatedDetection:
 
 
 class TestEntryText:
-    def _msg(self, subject="Subject line"):
-        return Message(
-            id=1, gmail_id="g", thread_id="t", account_label="personal",
-            sender_name="Dana", sender_email="dana@example.com", subject=subject,
-            body_text="b", timestamp=datetime(2026, 8, 10), internal_date_ms=1,
-            ingested_at=datetime(2026, 8, 10),
-        )
+    def _msg(self, subject="Subject line", text="b"):
+        from tests.factories import make_view
+
+        return make_view(eid=1, sender="Dana", email="dana@example.com",
+                         title=subject, text=text)
 
     def _cls(self, summary="Dana wants the draft", ok=True):
         return Classification(
-            message_id=1, category="needs_response", urgency="high",
+            event_id=1, category="needs_response", urgency="high",
             summary=summary, ok=ok, classified_at=datetime(2026, 8, 10),
         )
 
@@ -196,8 +194,15 @@ class TestEntryText:
     def test_falls_back_when_classification_failed(self):
         assert entry_text_for(self._msg(), self._cls(ok=False)) == "Subject line"
 
-    def test_handles_missing_subject(self):
-        assert entry_text_for(self._msg(subject=""), None) == "(no subject)"
+    def test_a_titleless_source_falls_back_to_its_first_line(self):
+        """An iMessage has no subject. Inventing one would be a lie, so the
+        log entry uses the first line of the text instead."""
+        view = self._msg(subject="", text="hey, did you send the deck?\nthanks")
+
+        assert entry_text_for(view, None) == "hey, did you send the deck?"
+
+    def test_an_empty_event_says_so(self):
+        assert entry_text_for(self._msg(subject="", text=""), None) == "(no content)"
 
 
 class TestFtsQuerySafety:
@@ -308,15 +313,13 @@ class TestSharedAddressDetection:
     def test_many_names_on_one_address_is_shared(self):
         from personalagi.context.store import shared_addresses
 
-        msgs = [
-            self._msg("invitations@linkedin.com", f"Person {i}", i) for i in range(6)
-        ]
+        msgs = [("invitations@linkedin.com", f"Person {i}") for i in range(6)]
         assert "invitations@linkedin.com" in shared_addresses(msgs)
 
     def test_one_person_with_many_messages_is_not_shared(self):
         from personalagi.context.store import shared_addresses
 
-        msgs = [self._msg("dana@example.com", "Dana Okafor", i) for i in range(20)]
+        msgs = [("dana@example.com", "Dana Okafor")] * 20
         assert shared_addresses(msgs) == set()
 
     def test_a_couple_of_name_spellings_is_not_shared(self):
@@ -324,9 +327,9 @@ class TestSharedAddressDetection:
         from personalagi.context.store import shared_addresses
 
         msgs = [
-            self._msg("dana@example.com", "Dana Okafor", 1),
-            self._msg("dana@example.com", "dana okafor", 2),
-            self._msg("dana@example.com", "D. Okafor", 3),
+            ("dana@example.com", "Dana Okafor"),
+            ("dana@example.com", "dana okafor"),
+            ("dana@example.com", "D. Okafor"),
         ]
         assert shared_addresses(msgs) == set()
 

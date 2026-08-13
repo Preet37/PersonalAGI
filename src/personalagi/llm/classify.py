@@ -22,10 +22,11 @@ from sqlmodel import Session
 
 from personalagi.config import Settings, get_settings
 from personalagi.db import get_engine, init_db
+from personalagi.events import EventView, load_views, pending_events
 from personalagi.llm.client import GroqClient, LLMError
 from personalagi.llm.prompts import load_prompt
 from personalagi.llm.schemas import UNCLASSIFIED, ClassificationOut
-from personalagi.models import Classification, Message
+from personalagi.models import Classification, Event
 
 log = logging.getLogger(__name__)
 
@@ -53,16 +54,22 @@ class ClassifyResult:
         )
 
 
-def render_message(message: Message) -> dict[str, str]:
-    """The fields the prompt template consumes."""
-    body = (message.body_text or "").strip()
+def render_message(view: EventView) -> dict[str, str]:
+    """The fields the prompt template consumes.
+
+    Reads an EventView, not a Gmail message. The prompt still speaks in
+    sender/subject terms because that is what reads naturally to a model
+    classifying correspondence — but those are now rendered FROM the canonical
+    record, so an iMessage or a calendar invite fills the same template.
+    """
+    body = (view.event.text or "").strip()
     if len(body) > BODY_CHAR_LIMIT:
         body = body[:BODY_CHAR_LIMIT] + "\n[...truncated]"
     return {
-        "sender_name": message.sender_name or "(unknown)",
-        "sender_email": message.sender_email or "(unknown)",
-        "date": message.timestamp.isoformat(sep=" ", timespec="minutes"),
-        "subject": message.subject or "(no subject)",
+        "sender_name": view.sender_name or "(unknown)",
+        "sender_email": view.sender_address or "(unknown)",
+        "date": view.event.timestamp.isoformat(sep=" ", timespec="minutes"),
+        "subject": view.event.title or "(no subject)",
         "body": body or "(empty body)",
     }
 
@@ -70,7 +77,7 @@ def render_message(message: Message) -> dict[str, str]:
 def classify_one(
     client: GroqClient,
     prompt,
-    message: Message,
+    view: EventView,
     *,
     max_attempts: int = 2,
 ) -> tuple[ClassificationOut | None, str | None]:
@@ -81,7 +88,7 @@ def classify_one(
     an identical failing prompt at temperature 0 mostly reproduces the same
     failure.
     """
-    user = prompt.render_user(**render_message(message))
+    user = prompt.render_user(**render_message(view))
     last_error: str | None = None
 
     for attempt in range(max_attempts):
@@ -99,10 +106,10 @@ def classify_one(
             return ClassificationOut.model_validate_json(content), None
         except (ValidationError, json.JSONDecodeError) as exc:
             last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
-            log.debug("message %s attempt %d invalid: %s", message.gmail_id, attempt + 1, exc)
+            log.debug("event %s attempt %d invalid: %s", view.event.source_id, attempt + 1, exc)
         except LLMError as exc:
             last_error = f"LLMError: {str(exc)[:200]}"
-            log.debug("message %s attempt %d failed: %s", message.gmail_id, attempt + 1, exc)
+            log.debug("event %s attempt %d failed: %s", view.event.source_id, attempt + 1, exc)
 
     return None, last_error
 
@@ -112,17 +119,13 @@ def _pending_messages(
     label: str | None,
     limit: int | None,
     reclassify: bool,
-) -> list[Message]:
-    stmt = select(Message)
-    if label:
-        stmt = stmt.where(Message.account_label == label)
-    if not reclassify:
-        classified = select(Classification.message_id)
-        stmt = stmt.where(Message.id.not_in(classified))
-    stmt = stmt.order_by(Message.internal_date_ms.desc())
-    if limit:
-        stmt = stmt.limit(limit)
-    return list(session.execute(stmt).scalars())
+) -> list[EventView]:
+    stmt = pending_events(
+        account=label,
+        exclude_scored=None if reclassify else select(Classification.event_id),
+        limit=limit,
+    )
+    return load_views(session, stmt)
 
 
 def _upsert(session: Session, rows: list[dict]) -> None:
@@ -133,7 +136,7 @@ def _upsert(session: Session, rows: list[dict]) -> None:
         chunk = rows[start : start + 90]
         stmt = sqlite_insert(Classification).values(chunk)
         stmt = stmt.on_conflict_do_update(
-            index_elements=["message_id"],
+            index_elements=["event_id"],
             set_={
                 "category": stmt.excluded.category,
                 "urgency": stmt.excluded.urgency,
@@ -150,12 +153,12 @@ def _upsert(session: Session, rows: list[dict]) -> None:
 
 
 def classify_labelled(
-    message_ids: list[int],
+    event_ids: list[int],
     settings: Settings | None = None,
     *,
     workers: int | None = None,
 ) -> int:
-    """Classify exactly these messages if they have no prediction yet.
+    """Classify exactly these events if they have no prediction yet.
 
     Used by `eval --classify-missing` so scoring never silently drops rows.
     """
@@ -166,16 +169,16 @@ def classify_labelled(
         already = {
             row
             for row in session.execute(
-                select(Classification.message_id).where(
-                    Classification.message_id.in_(message_ids)
+                select(Classification.event_id).where(
+                    Classification.event_id.in_(event_ids)
                 )
             ).scalars()
         }
-        todo = [mid for mid in message_ids if mid not in already]
+        todo = [eid for eid in event_ids if eid not in already]
         if not todo:
             return 0
-        messages = list(
-            session.execute(select(Message).where(Message.id.in_(todo))).scalars()
+        messages = load_views(
+            session, select(Event).where(Event.id.in_(todo))
         )
 
     if not messages:
@@ -186,10 +189,10 @@ def classify_labelled(
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
 
-    def work(message: Message) -> dict:
-        parsed, error = classify_one(client, prompt, message)
+    def work(view: EventView) -> dict:
+        parsed, error = classify_one(client, prompt, view)
         base = {
-            "message_id": message.id,
+            "event_id": view.event.id,
             "model": client.model,
             "prompt_version": prompt.version,
             "classified_at": now,
@@ -234,8 +237,8 @@ def classify_account(
 
         if not reclassify:
             total = session.execute(
-                select(func.count()).select_from(Message).where(
-                    Message.account_label == label if label else True
+                select(func.count()).select_from(Event).where(
+                    Event.account_label == label if label else True
                 )
             ).scalar_one()
             result.skipped_existing = max(0, total - len(messages))
@@ -259,13 +262,13 @@ def classify_account(
     now = datetime.now(UTC).replace(tzinfo=None)
     rows: list[dict] = []
 
-    def work(message: Message) -> dict:
-        parsed, error = classify_one(client, prompt, message)
+    def work(view: EventView) -> dict:
+        parsed, error = classify_one(client, prompt, view)
         if parsed is None:
             # Tombstone, not a dropped row: a failure must be visible in the
             # data or it silently shrinks the denominator of every metric.
             return {
-                "message_id": message.id,
+                "event_id": view.event.id,
                 "category": UNCLASSIFIED,
                 "urgency": "low",
                 "summary": "",
@@ -276,7 +279,7 @@ def classify_account(
                 "classified_at": now,
             }
         return {
-            "message_id": message.id,
+            "event_id": view.event.id,
             "category": parsed.category,
             "urgency": parsed.urgency,
             "summary": parsed.summary,

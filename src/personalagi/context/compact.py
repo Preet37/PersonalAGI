@@ -66,7 +66,7 @@ def history_path(context_dir: Path, slug: str) -> Path:
 
 def _fingerprint(person: PersonFile) -> str:
     """What the profile was derived from. Changes only when inputs change."""
-    ids = sorted(person.known_gmail_ids())
+    ids = sorted(person.known_source_ids())
     corrections = "|".join(person.corrections)
     return f"{len(person.log)}:{hash(tuple(ids)) & 0xFFFFFFFF:08x}:{hash(corrections) & 0xFFFF:04x}"
 

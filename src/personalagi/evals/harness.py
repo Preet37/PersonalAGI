@@ -19,9 +19,9 @@ from sqlmodel import Session
 from personalagi.config import Settings, get_settings
 from personalagi.db import get_engine, init_db
 from personalagi.evals.metrics import EvalReport, evaluate
-from personalagi.identity import is_human_sender, shared_addresses
+from personalagi.events import load_views, pending_events
 from personalagi.llm.schemas import CATEGORIES, UNCLASSIFIED, URGENCIES
-from personalagi.models import Classification, Message
+from personalagi.models import Classification
 
 log = logging.getLogger(__name__)
 
@@ -55,9 +55,9 @@ def _excerpt(text: str) -> str:
     return flat[:EXCERPT_CHARS]
 
 
-def _round_robin(buckets: list[list[Message]], n: int) -> list[Message]:
+def _round_robin(buckets: list[list], n: int) -> list:
     """Take one from each bucket in turn until n are picked or all are dry."""
-    picked: list[Message] = []
+    picked: list = []
     depth = 0
     while len(picked) < n and any(depth < len(b) for b in buckets):
         for bucket in buckets:
@@ -106,28 +106,24 @@ def generate_template(
     init_db(settings)
 
     with Session(get_engine(settings)) as session:
-        stmt = select(Message, Classification).join(
-            Classification, Classification.message_id == Message.id, isouter=True
-        )
-        if account:
-            stmt = stmt.where(Message.account_label == account)
-        stmt = stmt.order_by(Message.internal_date_ms.desc())
-        pairs = list(session.execute(stmt))
+        views = load_views(session, pending_events(account=account))
+        predicted_rows = {
+            c.event_id: c.category
+            for c in session.execute(select(Classification)).scalars()
+        }
 
-    if not pairs:
-        raise EvalError("no ingested messages to sample - run `ingest` first")
+    if not views:
+        raise EvalError("no events to sample - run `ingest` then `sync-events` first")
 
     predicted = {
-        message.id: (classification.category if classification else UNCLASSIFIED)
-        for message, classification in pairs
+        v.event.id: predicted_rows.get(v.event.id, UNCLASSIFIED) for v in views
     }
-    messages = [message for message, _ in pairs]
+    messages = views
 
     if human_only:
-        shared = shared_addresses(
-            (m.sender_email or "", m.sender_name or "") for m in messages
-        )
-        messages = [m for m in messages if is_human_sender(m.sender_email, shared)]
+        # Reads the adapter's participant verdict rather than recomputing it,
+        # so the eval samples exactly the population stage B actually scores.
+        messages = [v for v in views if not v.from_automated and v.sender_address]
         if not messages:
             raise EvalError(
                 "no human senders found - every ingested address looks automated"
@@ -135,22 +131,22 @@ def generate_template(
 
     # Round-robin over senders: take the 1st message of every sender, then
     # the 2nd of every sender, and so on, up to the per-sender cap.
-    by_sender: dict[str, list[Message]] = {}
-    for message in messages:
-        by_sender.setdefault(message.sender_email or "(unknown)", []).append(message)
+    by_sender: dict[str, list] = {}
+    for view in messages:
+        by_sender.setdefault(view.sender_address or "(unknown)", []).append(view)
 
-    capped: list[Message] = []
+    capped: list = []
     for depth in range(per_sender_cap):
         for sender_messages in by_sender.values():
             if depth < len(sender_messages):
                 capped.append(sender_messages[depth])
 
     if stratify:
-        by_category: dict[str, list[Message]] = {}
-        for message in capped:
-            by_category.setdefault(predicted.get(message.id, UNCLASSIFIED), []).append(
-                message
-            )
+        by_category: dict[str, list] = {}
+        for view in capped:
+            by_category.setdefault(
+                predicted.get(view.event.id, UNCLASSIFIED), []
+            ).append(view)
         # Rarest class first, so a class with few candidates is not starved by
         # the time the quota runs out.
         buckets = sorted(by_category.values(), key=len)
@@ -168,15 +164,19 @@ def generate_template(
     with out_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=TEMPLATE_COLUMNS)
         writer.writeheader()
-        for message in picked:
+        for view in picked:
             writer.writerow(
                 {
-                    "message_id": message.id,
-                    "gmail_id": message.gmail_id,
-                    "date": message.timestamp.isoformat(sep=" ", timespec="minutes"),
-                    "sender_email": message.sender_email,
-                    "subject": _excerpt(message.subject),
-                    "body_excerpt": _excerpt(message.body_text),
+                    # Column name kept as message_id: the owner already has a
+                    # labels.csv with this header, and Event ids equal the
+                    # Message ids they were migrated from, so old files still
+                    # score correctly against the new schema.
+                    "message_id": view.event.id,
+                    "gmail_id": view.event.source_id,
+                    "date": view.event.timestamp.isoformat(sep=" ", timespec="minutes"),
+                    "sender_email": view.sender_address,
+                    "subject": _excerpt(view.event.title),
+                    "body_excerpt": _excerpt(view.event.text),
                     "true_category": "",
                     "true_urgency": "",
                 }
@@ -245,9 +245,9 @@ def evaluate_labels(
     wanted = [row.message_id for row in labels]
     with Session(get_engine(settings)) as session:
         stored = {
-            c.message_id: c
+            c.event_id: c
             for c in session.execute(
-                select(Classification).where(Classification.message_id.in_(wanted))
+                select(Classification).where(Classification.event_id.in_(wanted))
             ).scalars()
         }
 

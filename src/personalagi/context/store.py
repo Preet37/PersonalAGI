@@ -20,12 +20,15 @@ from personalagi.context.people import (
     PersonFile,
     load_person,
     save_person,
-    slug_for,
 )
 from personalagi.db import get_engine, init_db
-from personalagi.identity import SHARED_ADDRESS_NAME_THRESHOLD, looks_automated
-from personalagi.identity import shared_addresses as _shared_addresses
-from personalagi.models import Classification, Message
+from personalagi.events import EventView, load_views, pending_events
+from personalagi.identity import (
+    SHARED_ADDRESS_NAME_THRESHOLD,
+    looks_automated,
+    shared_addresses,
+)
+from personalagi.models import Classification
 from personalagi.search import fts
 
 log = logging.getLogger(__name__)
@@ -35,10 +38,10 @@ log = logging.getLogger(__name__)
 # it is landfill. Override with include_categories=("*",).
 DEFAULT_INCLUDE = ("needs_response", "fyi", "unclassified")
 
-# The identity heuristics themselves live in personalagi.identity, which knows
-# nothing about Gmail — Stage 8 needs them to serve iMessage handles and
-# calendar organisers too. Re-exported here so callers and tests that predate
-# the move keep working.
+# The identity heuristics live in personalagi.identity, which knows nothing
+# about any source. Re-exported so callers and tests that predate the move keep
+# working; build_people itself no longer calls them at all, because the adapter
+# has already resolved every participant by the time an Event is stored.
 __all__ = [
     "SHARED_ADDRESS_NAME_THRESHOLD",
     "BuildResult",
@@ -71,20 +74,20 @@ class BuildResult:
         )
 
 
-def shared_addresses(messages, threshold: int = SHARED_ADDRESS_NAME_THRESHOLD) -> set[str]:
-    """Message-shaped adapter over identity.shared_addresses."""
-    return _shared_addresses(
-        ((m.sender_email or "", m.sender_name or "") for m in messages),
-        threshold=threshold,
-    )
+def entry_text_for(view, classification: Classification | None) -> str:
+    """Prefer the model's one-line summary; fall back to the event title.
 
-
-def entry_text_for(message: Message, classification: Classification | None) -> str:
-    """Prefer the model's one-line summary; fall back to the subject."""
+    Takes an EventView. For a source with no title — an iMessage has no
+    subject — the fallback is the first line of the text rather than a
+    fabricated one.
+    """
     if classification and classification.ok and classification.summary:
         return classification.summary
-    subject = (message.subject or "").strip()
-    return subject or "(no subject)"
+    title = (view.event.title or "").strip()
+    if title:
+        return title
+    first_line = (view.event.text or "").strip().splitlines()
+    return first_line[0][:120] if first_line else "(no content)"
 
 
 def build_people(
@@ -97,7 +100,14 @@ def build_people(
     context_dir: Path | None = None,
     reindex: bool = True,
 ) -> BuildResult:
-    """Fold messages into per-person markdown files, then rebuild the index."""
+    """Fold events into per-person markdown files, then rebuild the index.
+
+    Reads Events, not Gmail messages. The automated-sender filter and the
+    shared-envelope rule are no longer applied here at all — they were resolved
+    once at adapter time and are read off the participant row. That is the
+    payoff of D1: an iMessage thread lands in the same person file with no new
+    filtering code.
+    """
     settings = settings or get_settings()
     root = context_dir or settings.context_dir
     init_db(settings)
@@ -105,47 +115,45 @@ def build_people(
     result = BuildResult()
 
     with Session(get_engine(settings)) as session:
-        stmt = select(Message, Classification).join(
-            Classification, Classification.message_id == Message.id, isouter=True
-        )
-        if account:
-            stmt = stmt.where(Message.account_label == account)
-        stmt = stmt.order_by(Message.internal_date_ms.asc())
-        if limit:
-            stmt = stmt.limit(limit)
-        pairs = list(session.execute(stmt))
-
-    shared = shared_addresses(m for m, _ in pairs)
-    if shared:
-        log.info("treating %d address(es) as shared bulk senders", len(shared))
+        stmt = pending_events(account=account, limit=limit, newest_first=False)
+        views = load_views(session, stmt)
+        classifications = {
+            c.event_id: c
+            for c in session.execute(select(Classification)).scalars()
+        }
 
     # Group by person first so each file is opened and written exactly once.
-    grouped: dict[str, list[tuple[Message, Classification | None]]] = {}
+    grouped: dict[str, list[tuple[EventView, Classification | None]]] = {}
     identities: dict[str, tuple[str, set[str]]] = {}
 
-    for message, classification in pairs:
+    for view in views:
         result.messages_considered += 1
+        classification = classifications.get(view.event.id)
 
         category = classification.category if classification else "unclassified"
         if "*" not in include_categories and category not in include_categories:
             result.skipped_category += 1
             continue
 
-        if not include_automated and looks_automated(message.sender_email):
+        sender = view.sender
+        if not include_automated and (sender is None or sender.is_automated):
             result.skipped_automated += 1
             continue
 
-        slug = slug_for(message.sender_name, message.sender_email)
-        grouped.setdefault(slug, []).append((message, classification))
+        # An empty person_slug means the adapter decided this participant must
+        # never own a person file — a robot, the owner, or a shared envelope.
+        slug = sender.person_slug
+        if not slug:
+            result.skipped_automated += 1
+            continue
+
+        grouped.setdefault(slug, []).append((view, classification))
 
         name, emails = identities.setdefault(
-            slug, (message.sender_name or message.sender_email, set())
+            slug, (sender.display_name or sender.address, set())
         )
-        # Never attach a shared bulk address to a person. It is not their
-        # address, and recording it would make two unrelated people look like
-        # the same person on the next lookup.
-        if message.sender_email and message.sender_email not in shared:
-            emails.add(message.sender_email)
+        if sender.address:
+            emails.add(sender.address)
 
     for slug, items in grouped.items():
         name, emails = identities[slug]
@@ -154,11 +162,15 @@ def build_people(
         person.emails = sorted(set(person.emails) | emails)
 
         added = 0
-        for message, classification in items:
+        for view, classification in items:
             entry = LogEntry(
-                entry_date=message.timestamp.date(),
-                text=entry_text_for(message, classification),
-                gmail_id=message.gmail_id,
+                entry_date=view.event.timestamp.date(),
+                text=entry_text_for(view, classification),
+                # Still called source_id in the log-line anchor format: the
+                # vault is on disk with thousands of `[g:...]` anchors already
+                # written, and rewriting them would break every existing file's
+                # idempotency key for a cosmetic gain.
+                source_id=view.event.source_id,
             )
             if person.add_entry(entry):
                 added += 1

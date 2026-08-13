@@ -70,6 +70,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="repeat passes until no older mail remains",
     )
 
+    sync = sub.add_parser(
+        "sync-events",
+        help="project ingested mail into canonical Events (ARCHITECTURE.md D1)",
+    )
+    sync.add_argument("--account", default=None)
+    sync.add_argument("--limit", type=int, default=None)
+    sync.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="re-project every message, not only those without an event",
+    )
+
     headers = sub.add_parser(
         "refresh-headers",
         help="backfill message headers (List-Unsubscribe etc) for existing mail",
@@ -272,6 +284,19 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
             break
     if passes > 1:
         print(f"({passes} backfill passes)")
+    return 0
+
+
+def _cmd_sync_events(args: argparse.Namespace) -> int:
+    from personalagi.adapters.gmail_adapter import sync_events
+
+    events, participants = sync_events(
+        get_settings(),
+        account=args.account,
+        limit=args.limit,
+        rebuild=args.rebuild,
+    )
+    print(f"{events} event(s), {participants} participant(s)")
     return 0
 
 
@@ -601,6 +626,7 @@ def main(argv: list[str] | None = None) -> int:
         "auth": _cmd_auth,
         "ingest": _cmd_ingest,
         "backfill": _cmd_backfill,
+        "sync-events": _cmd_sync_events,
         "refresh-headers": _cmd_refresh_headers,
         "classify": _cmd_classify,
         "relevance": _cmd_relevance,

@@ -21,7 +21,8 @@ from personalagi.commitments import (
     render_owed,
 )
 from personalagi.config import Settings
-from personalagi.models import Commitment, Message
+from personalagi.models import Commitment
+from tests.factories import make_event
 
 NOW = datetime(2026, 8, 13, 2, 0)
 
@@ -39,23 +40,18 @@ def add(settings, **overrides) -> int:
     """Insert one commitment (plus its source message) and return its id."""
     engine = db_module.init_db(settings)
     with Session(engine) as session:
-        message = Message(
-            gmail_id=overrides.pop("gmail_id", "g1"),
-            thread_id="t1",
-            account_label="personal",
-            sender_name="Karan",
-            sender_email="karan@example.com",
-            subject="sponsorship",
-            body_text="I'll send you the prospectus this week.",
-            timestamp=NOW,
-            internal_date_ms=1,
-            ingested_at=NOW,
+        event = make_event(
+            eid=None,
+            source_id=overrides.pop("gmail_id", "g1"),
+            title="sponsorship",
+            text="I'll send you the prospectus this week.",
+            ms=int(NOW.timestamp() * 1000),
         )
-        session.add(message)
+        session.add(event)
         session.flush()
 
         base = {
-            "message_id": message.id,
+            "event_id": event.id,
             "direction": "i_owe",
             "person_slug": "karan",
             "person_name": "Karan",
@@ -151,7 +147,7 @@ class TestDedup:
         with Session(db_module.get_engine(settings)) as session:
             row = session.get(Commitment, first)
             duplicate = {
-                "message_id": row.message_id,
+                "event_id": row.event_id,
                 "direction": row.direction,
                 "person_slug": row.person_slug,
                 "person_name": row.person_name,
@@ -181,7 +177,7 @@ class TestDedup:
             _upsert_commitments(
                 session,
                 [{
-                    "message_id": row.message_id, "direction": row.direction,
+                    "event_id": row.event_id, "direction": row.direction,
                     "person_slug": row.person_slug, "person_name": row.person_name,
                     "person_email": row.person_email, "what": row.what,
                     "what_hash": row.what_hash, "quote": row.quote,

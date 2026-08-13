@@ -120,11 +120,11 @@ def get_context(
     k: int = 5,
     engine: Engine | None = None,
     context_dir: Path | None = None,
-    exclude_gmail_ids: set[str] | None = None,
+    exclude_source_ids: set[str] | None = None,
 ) -> RetrievedContext | None:
     """Frontmatter + profile always; top-k relevant log lines on demand.
 
-    `exclude_gmail_ids` drops log lines that came from specific messages. This
+    `exclude_source_ids` drops log lines that came from specific messages. This
     exists because context flows one way — messages become log lines — so
     retrieving context FOR a message will otherwise return that same message
     back as evidence about itself.
@@ -144,7 +144,7 @@ def get_context(
     if found is None:
         return None
 
-    excluded = exclude_gmail_ids or set()
+    excluded = exclude_source_ids or set()
 
     always_on = "\n".join(
         [
@@ -163,18 +163,18 @@ def get_context(
         hits = [
             hit
             for hit in fts.search(engine, query, person_slug=found.slug, limit=limit)
-            if hit.gmail_id not in excluded
+            if hit.source_id not in excluded
         ][:k]
 
     if not hits:
         # No query, or nothing matched: fall back to the most recent lines,
         # which is the sane default for "tell me about this person".
-        recent = [e for e in found.sorted_log() if e.gmail_id not in excluded][:k]
+        recent = [e for e in found.sorted_log() if e.source_id not in excluded][:k]
         lines = [entry.render() for entry in recent]
     else:
         lines = [hit.render() for hit in hits]
 
-    remaining_log = [e for e in found.sorted_log() if e.gmail_id not in excluded]
+    remaining_log = [e for e in found.sorted_log() if e.source_id not in excluded]
     full_log_text = "\n".join(entry.render() for entry in remaining_log)
     returned_text = always_on + "\n" + "\n".join(lines)
 

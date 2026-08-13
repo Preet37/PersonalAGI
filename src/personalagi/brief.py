@@ -23,7 +23,8 @@ from sqlmodel import Session
 from personalagi.config import Settings, get_settings
 from personalagi.context.retrieve import RetrievedContext, get_context
 from personalagi.db import get_engine, init_db
-from personalagi.models import Classification, Message
+from personalagi.events import EventView, load_views
+from personalagi.models import Classification, Event
 
 log = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ URGENCY_MARK = {"high": "!!", "med": "!", "low": "  "}
 
 @dataclass
 class BriefItem:
-    message: Message
+    view: EventView
     classification: Classification
     context: RetrievedContext | None = None
 
@@ -42,8 +43,12 @@ class BriefItem:
         return self.classification.urgency or "low"
 
     @property
+    def sender(self) -> str:
+        return self.view.sender_name or self.view.sender_address
+
+    @property
     def sort_key(self) -> tuple[int, int]:
-        return (URGENCY_ORDER.get(self.urgency, 3), -self.message.internal_date_ms)
+        return (URGENCY_ORDER.get(self.urgency, 3), -self.view.event.timestamp_ms)
 
 
 @dataclass
@@ -86,16 +91,24 @@ def build_brief(
 
     with Session(get_engine(settings)) as session:
         stmt = (
-            select(Message, Classification)
-            .join(Classification, Classification.message_id == Message.id)
-            .where(Message.internal_date_ms >= cutoff_ms)
-            .where(Message.internal_date_ms < end_ms)
+            select(Event)
+            .where(Event.timestamp_ms >= cutoff_ms)
+            .where(Event.timestamp_ms < end_ms)
         )
         if accounts:
-            stmt = stmt.where(Message.account_label.in_(accounts))
-        rows = list(session.execute(stmt))
+            stmt = stmt.where(Event.account_label.in_(accounts))
+        views = load_views(session, stmt)
+        classifications = {
+            c.event_id: c
+            for c in session.execute(
+                select(Classification).where(
+                    Classification.event_id.in_([v.event.id for v in views])
+                )
+            ).scalars()
+        }
+        rows = [(v, classifications[v.event.id]) for v in views if v.event.id in classifications]
 
-    for message, classification in rows:
+    for view, classification in rows:
         brief.total_messages += 1
         category = classification.category
         brief.counts[category] += 1
@@ -105,11 +118,11 @@ def build_brief(
             continue
 
         if category == "needs_response":
-            brief.needs_response.setdefault(message.account_label, []).append(
-                BriefItem(message, classification)
+            brief.needs_response.setdefault(view.event.account_label, []).append(
+                BriefItem(view, classification)
             )
         elif category == "fyi":
-            brief.fyi.append(BriefItem(message, classification))
+            brief.fyi.append(BriefItem(view, classification))
 
     # Retrieve context only for what needs action. Doing it for every FYI
     # would cost a file read and an FTS query per message for information
@@ -119,10 +132,12 @@ def build_brief(
         for item in items:
             try:
                 item.context = get_context(
-                    item.message.sender_email,
-                    item.message.subject or "",
+                    item.view.person_slug or item.view.sender_address,
+                    item.view.event.title or "",
                     settings,
                     k=context_k,
+                    # A message must not be retrieved as context for itself.
+                    exclude_source_ids={item.view.event.source_id},
                 )
             except LookupError:
                 item.context = None
@@ -156,13 +171,12 @@ def render_brief(brief: Brief) -> str:
             lines.append("")
             for item in items:
                 mark = URGENCY_MARK.get(item.urgency, "  ")
-                sender = item.message.sender_name or item.message.sender_email
                 lines.append(
-                    f"- {mark} **{sender}** — {item.classification.summary}"
+                    f"- {mark} **{item.sender}** — {item.classification.summary}"
                 )
                 lines.append(
-                    f"      _{item.message.subject}_  "
-                    f"({item.urgency}, {item.message.timestamp:%b %d %H:%M})"
+                    f"      _{item.view.event.title}_  "
+                    f"({item.urgency}, {item.view.event.timestamp:%b %d %H:%M})"
                 )
                 if item.context and item.context.profile:
                     lines.append(f"      context: {item.context.profile}")
@@ -175,8 +189,7 @@ def render_brief(brief: Brief) -> str:
     if brief.fyi:
         lines += ["## FYI", ""]
         for item in brief.fyi:
-            sender = item.message.sender_name or item.message.sender_email
-            lines.append(f"- {sender} — {item.classification.summary}")
+            lines.append(f"- {item.sender} — {item.classification.summary}")
         lines.append("")
 
     promo = brief.counts.get("promotional", 0)
