@@ -70,6 +70,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="repeat passes until no older mail remains",
     )
 
+    headers = sub.add_parser(
+        "refresh-headers",
+        help="backfill message headers (List-Unsubscribe etc) for existing mail",
+    )
+    headers.add_argument("--account", default=None, help="default: every account")
+    headers.add_argument("--limit", type=int, default=None)
+    headers.add_argument("--workers", type=int, default=None)
+
     classify = sub.add_parser("classify", help="classify ingested mail with Groq")
     classify.add_argument("--account", default=None, help="account label; omit for all")
     classify.add_argument("--limit", type=int, default=None, help="cap messages this run")
@@ -80,6 +88,32 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     classify.add_argument("--workers", type=int, default=None, help="concurrent Groq calls")
     classify.add_argument("--dry-run", action="store_true")
+
+    rel = sub.add_parser(
+        "relevance",
+        help="two-stage relevance: structural triage, then context-aware scoring",
+    )
+    rel.add_argument("--account", default=None)
+    rel.add_argument("--limit", type=int, default=None)
+    rel.add_argument("--rescore", action="store_true", help="re-score already-scored mail")
+    rel.add_argument("--workers", type=int, default=None)
+    rel.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what stage A filters without making any LLM call",
+    )
+
+    owed = sub.add_parser("owed", help="open commitments, grouped by person")
+    owed.add_argument(
+        "--to-me",
+        action="store_true",
+        help="show what others owe you instead of what you owe them",
+    )
+    owed.add_argument("--person", default=None, help="filter to one person slug")
+    owed.add_argument("--include-done", action="store_true")
+
+    done = sub.add_parser("done", help="mark a commitment as fulfilled")
+    done.add_argument("commitment_id", type=int)
 
     template = sub.add_parser(
         "labels-template",
@@ -241,6 +275,25 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_refresh_headers(args: argparse.Namespace) -> int:
+    from personalagi.ingest.gmail import refresh_headers
+
+    settings = get_settings()
+    labels = [args.account] if args.account else settings.account_labels
+    total = 0
+    for label in labels:
+        if not settings.token_path(label).exists():
+            print(f"{label}: NOT AUTHORIZED - skipping")
+            continue
+        result = refresh_headers(
+            label, settings, limit=args.limit, fetch_workers=args.workers
+        )
+        print(result.summary())
+        total += result.updated
+    print(f"\n{total} message(s) now have headers.")
+    return 0
+
+
 def _cmd_classify(args: argparse.Namespace) -> int:
     from personalagi.llm.classify import classify_account
 
@@ -259,6 +312,51 @@ def _cmd_classify(args: argparse.Namespace) -> int:
     )
     print(result.summary())
     return 0
+
+
+def _cmd_relevance(args: argparse.Namespace) -> int:
+    from personalagi.llm.relevance import RelevanceError, score_messages
+
+    try:
+        result = score_messages(
+            get_settings(),
+            account=args.account,
+            limit=args.limit,
+            rescore=args.rescore,
+            workers=args.workers,
+            dry_run=args.dry_run,
+        )
+    except RelevanceError as exc:
+        print(f"error: {exc}")
+        return 2
+    print(result.summary())
+    return 0
+
+
+def _cmd_owed(args: argparse.Namespace) -> int:
+    from personalagi.commitments import list_owed, refresh_stale, render_owed
+
+    settings = get_settings()
+    refresh_stale(settings)
+    direction = "they_owe" if args.to_me else "i_owe"
+    groups = list_owed(
+        settings,
+        direction=direction,
+        include_done=args.include_done,
+        person=args.person,
+    )
+    print(render_owed(groups, direction=direction))
+    return 0
+
+
+def _cmd_done(args: argparse.Namespace) -> int:
+    from personalagi.commitments import close_commitment
+
+    if close_commitment(args.commitment_id, get_settings()):
+        print(f"commitment {args.commitment_id} marked done")
+        return 0
+    print(f"no commitment with id {args.commitment_id}")
+    return 1
 
 
 def _cmd_labels_template(args: argparse.Namespace) -> int:
@@ -503,7 +601,11 @@ def main(argv: list[str] | None = None) -> int:
         "auth": _cmd_auth,
         "ingest": _cmd_ingest,
         "backfill": _cmd_backfill,
+        "refresh-headers": _cmd_refresh_headers,
         "classify": _cmd_classify,
+        "relevance": _cmd_relevance,
+        "owed": _cmd_owed,
+        "done": _cmd_done,
         "labels-template": _cmd_labels_template,
         "eval": _cmd_eval,
         "context-build": _cmd_context_build,

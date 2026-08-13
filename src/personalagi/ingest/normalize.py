@@ -9,11 +9,41 @@ from __future__ import annotations
 import base64
 import binascii
 import html as html_module
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.header import decode_header, make_header
 from email.utils import parseaddr
+
+# Headers worth persisting, lowercased. Two groups:
+#
+#   Bulk markers. These are what actually separate a machine from a person.
+#   The local-part regex cannot see `uber@uber.com` or `googlecloud@google.com`
+#   — there is no robot token in either — but both carry List-Unsubscribe, and
+#   essentially no human's mail client emits one. RFC 2369 / RFC 3834.
+#
+#   Threading and recipients. Needed for participant resolution (Stage 8) and
+#   to tell "I promised them" from "they promised me" (commitment tracking):
+#   a message where the owner is the sender is a promise made, not received.
+HEADER_WHITELIST = (
+    "list-unsubscribe",
+    "list-id",
+    "precedence",
+    "auto-submitted",
+    "x-auto-response-suppress",
+    "return-path",
+    "reply-to",
+    "to",
+    "cc",
+    "message-id",
+    "in-reply-to",
+    "references",
+)
+
+# Long headers cost storage and buy nothing: References on a deep thread runs
+# to kilobytes and we only ever test it for presence and split it on spaces.
+HEADER_VALUE_LIMIT = 2000
 
 
 @dataclass
@@ -27,6 +57,7 @@ class NormalizedMessage:
     body_text: str
     timestamp: datetime
     internal_date_ms: int
+    headers: dict[str, str] = field(default_factory=dict)
     ingested_at: datetime = field(
         default_factory=lambda: datetime.now(UTC).replace(tzinfo=None)
     )
@@ -42,8 +73,26 @@ class NormalizedMessage:
             "body_text": self.body_text,
             "timestamp": self.timestamp,
             "internal_date_ms": self.internal_date_ms,
+            "headers_json": json.dumps(self.headers, ensure_ascii=False),
             "ingested_at": self.ingested_at,
         }
+
+
+def extract_headers(payload: dict) -> dict[str, str]:
+    """Pull the whitelisted headers into a flat lowercase dict.
+
+    Repeated headers keep the first occurrence. Gmail can return duplicates
+    (notably Received and, rarely, Reply-To); for every header here the first
+    is the one that matters.
+    """
+    found: dict[str, str] = {}
+    for header in payload.get("headers", []) or []:
+        name = (header.get("name") or "").lower()
+        if name in HEADER_WHITELIST and name not in found:
+            value = (header.get("value") or "").strip()
+            if value:
+                found[name] = value[:HEADER_VALUE_LIMIT]
+    return found
 
 
 # --- headers -----------------------------------------------------------
@@ -272,4 +321,5 @@ def normalize_message(raw: dict, account_label: str) -> NormalizedMessage:
         body_text=extract_body(payload),
         timestamp=timestamp,
         internal_date_ms=internal_date_ms,
+        headers=extract_headers(payload),
     )

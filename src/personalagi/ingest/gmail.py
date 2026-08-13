@@ -7,6 +7,7 @@ normalize.py know nothing about each other.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from collections.abc import Callable
@@ -161,6 +162,130 @@ def _fetch_and_normalize(
             oldest_ms = ms if oldest_ms is None else min(oldest_ms, ms)
 
     return rows, newest_ms, oldest_ms
+
+
+@dataclass
+class HeaderRefreshResult:
+    account_label: str
+    considered: int = 0
+    updated: int = 0
+    failed: int = 0
+    bulk_markers_found: int = 0
+
+    def summary(self) -> str:
+        return (
+            f"{self.account_label}: considered={self.considered} "
+            f"updated={self.updated} failed={self.failed}  "
+            f"bulk markers on {self.bulk_markers_found}"
+        )
+
+
+# Commit every N rows rather than once at the end. A 4,000-message refresh
+# that dies at row 3,900 should keep the 3,900, not discard them: unlike
+# ingest there is no cursor to make a re-run cheap, and the work is pure
+# read-then-update, so partial progress is always valid.
+HEADER_COMMIT_CHUNK = 200
+
+
+def refresh_headers(
+    label: str,
+    settings: Settings | None = None,
+    *,
+    limit: int | None = None,
+    fetch_workers: int | None = None,
+    service: object | None = None,
+) -> HeaderRefreshResult:
+    """Backfill `headers_json` for messages ingested before it existed.
+
+    Bodies are already stored, so this re-reads headers only (metadata format)
+    rather than re-downloading 4,000 message bodies for data we discarded.
+
+    Idempotent and resumable: only rows where headers_json IS NULL are
+    considered, so re-running picks up exactly what an interrupted run missed.
+    """
+    from personalagi.identity import automated_by_header
+
+    settings = settings or get_settings()
+    init_db(settings)
+    result = HeaderRefreshResult(account_label=label)
+
+    with Session(get_engine(settings)) as session:
+        stmt = (
+            select(Message.id, Message.gmail_id)
+            .where(Message.account_label == label)
+            .where(Message.headers_json.is_(None))
+            .order_by(Message.internal_date_ms.desc())
+        )
+        if limit:
+            stmt = stmt.limit(limit)
+        targets = list(session.execute(stmt))
+
+    result.considered = len(targets)
+    if not targets:
+        log.info("%s: no messages need headers", label)
+        return result
+
+    service = service or build_service(load_credentials(label, settings))
+    workers = fetch_workers or settings.fetch_workers
+    header_names = [name.title() for name in normalize.HEADER_WHITELIST]
+
+    local = threading.local()
+    concurrent = workers > 1
+
+    def client_for_thread():
+        if not concurrent:
+            return service
+        existing = getattr(local, "service", None)
+        if existing is None:
+            # httplib2.Http is not thread-safe; each thread gets its own.
+            existing = build_service(load_credentials(label, settings))
+            local.service = existing
+        return existing
+
+    def fetch_one(target) -> tuple[int, dict[str, str]] | None:
+        message_id, gmail_id = target
+        try:
+            raw = fetch.get_message_headers(
+                client_for_thread(), gmail_id, header_names
+            )
+        except Exception:
+            log.exception("%s: failed to fetch headers for %s", label, gmail_id)
+            return None
+        return message_id, normalize.extract_headers(raw.get("payload", {}) or {})
+
+    for start in range(0, len(targets), HEADER_COMMIT_CHUNK):
+        chunk = targets[start : start + HEADER_COMMIT_CHUNK]
+        if concurrent:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                fetched = list(pool.map(fetch_one, chunk))
+        else:
+            fetched = [fetch_one(t) for t in chunk]
+
+        with Session(get_engine(settings)) as session:
+            for item in fetched:
+                if item is None:
+                    result.failed += 1
+                    continue
+                message_id, headers = item
+                message = session.get(Message, message_id)
+                if message is None:
+                    result.failed += 1
+                    continue
+                # "{}" not None: a message genuinely carrying none of the
+                # whitelisted headers must record that it was CHECKED, or the
+                # next run re-fetches it forever.
+                message.headers_json = json.dumps(headers, ensure_ascii=False)
+                session.add(message)
+                result.updated += 1
+                if automated_by_header(headers):
+                    result.bulk_markers_found += 1
+            session.commit()
+        log.info(
+            "%s: headers %d/%d", label, min(start + len(chunk), len(targets)), len(targets)
+        )
+
+    log.info(result.summary())
+    return result
 
 
 def _finish(session: Session, state: IngestState, label: str) -> None:

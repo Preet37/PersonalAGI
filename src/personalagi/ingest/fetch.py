@@ -266,3 +266,27 @@ def get_message(service, message_id: str, user_id: str = "me") -> dict:
     return execute(
         service.users().messages().get(userId=user_id, id=message_id, format="full")
     )
+
+
+def get_message_headers(
+    service,
+    message_id: str,
+    header_names: list[str],
+    user_id: str = "me",
+) -> dict:
+    """Fetch only the named headers for one message.
+
+    Same 5 quota units as a full get, but a tiny fraction of the bytes — this
+    exists to re-read headers for messages whose bodies are already stored, so
+    transferring 4,000 message bodies again would be pure waste.
+    """
+    return execute(
+        service.users()
+        .messages()
+        .get(
+            userId=user_id,
+            id=message_id,
+            format="metadata",
+            metadataHeaders=header_names,
+        )
+    )

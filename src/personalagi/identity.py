@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 # Robot markers anywhere in the local part, delimiter-bounded. The prefix-only
 # version of this missed `jobalerts-noreply@linkedin.com` — 377 messages in the
@@ -78,6 +79,49 @@ def shared_addresses(
     }
 
 
+# Header-based bulk markers, checked before any address heuristic because they
+# are declarations rather than guesses. RFC 2369 (List-*), RFC 3834
+# (Auto-Submitted). A marketing platform is contractually obliged to emit
+# List-Unsubscribe; a person's mail client never does.
+#
+# This is the signal the local-part regex structurally cannot reach:
+# `uber@uber.com`, `googlecloud@google.com` and `britishairways@crm.ba.com` all
+# passed `looks_automated` as "human" because the brand name is the local part.
+_BULK_HEADERS = ("list-unsubscribe", "list-id")
+_BULK_PRECEDENCE = {"bulk", "list", "junk", "auto_reply"}
+
+
+def automated_by_header(headers: dict[str, str] | None) -> str | None:
+    """Return the header that proves this is machine mail, or None.
+
+    Returns the *reason* rather than a bool so a misfire is debuggable: when
+    someone real is filtered out, you want to know which header did it.
+
+    None means "no bulk marker found", which for an empty/missing dict means
+    "nothing known" — the caller decides what to do with that. It is never
+    evidence of a human.
+    """
+    if not headers:
+        return None
+
+    normalized = {k.lower(): (v or "") for k, v in headers.items()}
+
+    for name in _BULK_HEADERS:
+        if normalized.get(name):
+            return name
+
+    precedence = normalized.get("precedence", "").strip().lower()
+    if precedence in _BULK_PRECEDENCE:
+        return f"precedence:{precedence}"
+
+    auto = normalized.get("auto-submitted", "").strip().lower()
+    # RFC 3834: "no" means a human sent it. Anything else is machine-generated.
+    if auto and auto != "no":
+        return f"auto-submitted:{auto}"
+
+    return None
+
+
 def is_human_sender(email: str, shared: set[str] | None = None) -> bool:
     """Both tests at once: not a robot address, not a shared envelope.
 
@@ -91,3 +135,57 @@ def is_human_sender(email: str, shared: set[str] | None = None) -> bool:
     if looks_automated(address):
         return False
     return address not in (shared or set())
+
+
+@dataclass(frozen=True)
+class SenderVerdict:
+    """Stage A's answer: human or machine, why, and whether to trust it."""
+
+    is_human: bool
+    reason: str
+    # False only when nothing positive was found either way — a clean-looking
+    # address with no headers fetched. These are the rows worth spending an
+    # LLM call on; everything else was decided structurally for free.
+    confident: bool = True
+
+    @property
+    def needs_llm(self) -> bool:
+        return not self.confident
+
+
+def classify_sender(
+    email: str,
+    headers: dict[str, str] | None = None,
+    shared: set[str] | None = None,
+) -> SenderVerdict:
+    """Stage A of two-stage relevance: is this a person or a machine?
+
+    Ordered cheapest-and-most-certain first. Header evidence outranks address
+    heuristics because it is a declaration by the sending system rather than an
+    inference from a string.
+
+    Deliberately asymmetric: any single piece of evidence proves *automated*,
+    but proving *human* requires having looked at headers at all. Absence of a
+    bulk marker in headers we never fetched is not evidence of a person, and
+    collapsing that distinction would silently promote the whole corpus to
+    human the moment the column was added.
+    """
+    address = (email or "").strip().lower()
+    if not address:
+        return SenderVerdict(False, "no sender address")
+
+    header_reason = automated_by_header(headers)
+    if header_reason:
+        return SenderVerdict(False, f"header {header_reason}")
+
+    if looks_automated(address):
+        return SenderVerdict(False, "robot address pattern")
+
+    if address in (shared or set()):
+        return SenderVerdict(False, "shared bulk envelope (many display names)")
+
+    if headers:
+        return SenderVerdict(True, "clean address, no bulk headers")
+
+    # Clean address, but headers were never fetched for this row.
+    return SenderVerdict(True, "clean address, headers unavailable", confident=False)
