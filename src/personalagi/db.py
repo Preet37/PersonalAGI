@@ -131,6 +131,48 @@ def _rename_columns(engine: Engine) -> list[str]:
     return renamed
 
 
+# Columns whose Python default must be written into EXISTING rows, not just
+# applied to new ones.
+#
+# _add_missing_columns adds nullable columns with DEFAULT NULL, which is right
+# when "unset" is meaningful (headers_json: unknown != no headers). It is
+# wrong for provenance: every row that existed before the column did came from
+# a real mailbox or a real phone, and leaving them NULL makes citable_events()
+# exclude the entire corpus -- so nothing is citable and every claim silently
+# loses its evidence. Caught by checking the count after migrating, not by a
+# test, which is the same lesson as the gitignore bug.
+_BACKFILL_DEFAULTS: tuple[tuple[str, str, str], ...] = (
+    ("event", "provenance", "external"),
+)
+
+
+def _backfill_defaults(engine: Engine) -> list[str]:
+    """Fill NULLs left by an additive migration. Idempotent."""
+    filled: list[str] = []
+    with engine.begin() as conn:
+        for table, column, value in _BACKFILL_DEFAULTS:
+            exists = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=:n",
+                {"n": table},
+            ).fetchone()
+            if not exists:
+                continue
+            columns = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            }
+            if column not in columns:
+                continue
+            result = conn.exec_driver_sql(
+                f"UPDATE {table} SET {column} = :v WHERE {column} IS NULL",
+                {"v": value},
+            )
+            if result.rowcount:
+                filled.append(f"{table}.{column}={value} x{result.rowcount}")
+    if filled:
+        log.info("backfilled defaults: %s", ", ".join(filled))
+    return filled
+
+
 def init_db(settings: Settings | None = None) -> Engine:
     engine = get_engine(settings)
     # Rename BEFORE create_all: otherwise create_all sees a table missing
@@ -140,6 +182,8 @@ def init_db(settings: Settings | None = None) -> Engine:
     _rename_columns(engine)
     SQLModel.metadata.create_all(engine)
     _add_missing_columns(engine)
+    # After the columns exist, never before.
+    _backfill_defaults(engine)
     return engine
 
 

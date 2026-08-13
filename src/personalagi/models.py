@@ -94,6 +94,22 @@ class Event(SQLModel, table=True):
     # calendar recurrence, iMessage service. D1's stated mitigation for
     # lowest-common-denominator loss.
     metadata_json: str | None = None
+
+    # EXTERNAL (came from the world) or GENERATED (the system wrote it).
+    #
+    # This is the structural fix for the self-citation bug. Twice in one night
+    # the system grounded a conclusion in its own output: a decommission notice
+    # cited a log line that notice had produced, and the owner's own sent mail
+    # was cited as proof that something mattered to the owner. Both times
+    # self-reference read exactly like independent corroboration.
+    #
+    # Excluding generated records at retrieval time is a patch that has to be
+    # remembered at every call site. Marking provenance at write time is a
+    # property of the record, and `citable_events()` is the one place that
+    # enforces it. Defaults to EXTERNAL because every row that existed before
+    # this column did came from a real mailbox or a real phone.
+    provenance: str = Field(default="external", index=True)
+
     ingested_at: datetime
 
 
@@ -246,7 +262,20 @@ class Commitment(SQLModel, table=True):
     # model, so the rule is inspectable and cheap to change.
     status: str = Field(default="open", index=True)
     promised_at: datetime = Field(index=True)
+
+    # Staleness is measured from HERE, not from promised_at.
+    #
+    # The first version measured from the promise, which meant a commitment you
+    # fulfilled a week later still went stale on schedule and nagged forever.
+    # What matters is "has anything happened on this since", so any later event
+    # in the same thread, with the same person, pushes this forward.
+    # Defaults to promised_at on rows written before the column existed.
+    last_activity_at: datetime | None = Field(default=None, index=True)
+
     resolved_at: datetime | None = None
+    # Which goal this promise serves, when it serves one. Lets a nudge say
+    # what is at stake rather than just what is late.
+    goal_id: int | None = Field(default=None, foreign_key="goal.id", index=True)
     # Human override. A commitment marked done by hand must survive the next
     # extraction run, exactly like a person file's `corrections`.
     manually_closed: bool = False
@@ -254,6 +283,235 @@ class Commitment(SQLModel, table=True):
     model: str = ""
     prompt_version: str = ""
     extracted_at: datetime
+
+
+class Goal(SQLModel, table=True):
+    """Something the owner is trying to achieve. The missing record type.
+
+    Without goals the system can only answer "did something arrive". With them
+    it can answer "is anything I care about not moving", which is the question
+    that catches the letter of recommendation nobody ever asked for.
+
+    Markdown at context/goals/<slug>.md is the source of truth (D2); this table
+    is the queryable index. Deadline arithmetic and staleness checks are plain
+    SQL over these columns — no model call — which is what makes the proactive
+    sweep cost pennies instead of hundreds of dollars.
+    """
+
+    __tablename__ = "goal"
+    __table_args__ = (UniqueConstraint("slug", name="uq_goal_slug"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    slug: str = Field(index=True)
+    title: str = ""
+    # Why it matters. Carried into proposals so a nudge can say what it serves.
+    why: str = ""
+
+    deadline: datetime | None = Field(default=None, index=True)
+    # active | done | abandoned | blocked
+    status: str = Field(default="active", index=True)
+
+    # Last time ANY linked event, commitment, or step moved. Distinct from
+    # updated_at, which changes when the goal text is edited — editing a
+    # description is not progress and must not reset a staleness clock.
+    last_activity: datetime | None = Field(default=None, index=True)
+    created_at: datetime
+    updated_at: datetime
+
+
+class GoalStep(SQLModel, table=True):
+    """One required step, and whether anything anywhere supports it.
+
+    `done=False` + no evidence + a near deadline is the single highest-value
+    signal in the system. It is also the only one that fires on ABSENCE, which
+    is why evidence is a linked set rather than a boolean the owner maintains
+    by hand: a step nobody has touched looks identical to one nobody recorded.
+    """
+
+    __tablename__ = "goal_step"
+
+    id: int | None = Field(default=None, primary_key=True)
+    goal_id: int = Field(foreign_key="goal.id", index=True)
+    description: str = ""
+    position: int = 0
+
+    done: bool = Field(default=False, index=True)
+    # True when nothing else can proceed until this is finished.
+    blocking: bool = Field(default=False, index=True)
+
+    # Set when evidence is found or the owner marks it done, so "how long has
+    # this been stalled" is answerable.
+    last_activity: datetime | None = Field(default=None, index=True)
+    created_at: datetime
+
+
+class StepEvidence(SQLModel, table=True):
+    """Link table: which events support which step.
+
+    A separate table rather than a JSON list because the central query is
+    "steps with no evidence", and an anti-join needs an index. Also lets one
+    event support several steps, which is common — a single email can be
+    evidence for both "ask for the letter" and "confirm the deadline".
+    """
+
+    __tablename__ = "step_evidence"
+    __table_args__ = (
+        UniqueConstraint("step_id", "event_id", name="uq_step_evidence"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    step_id: int = Field(foreign_key="goal_step.id", index=True)
+    event_id: int = Field(foreign_key="event.id", index=True)
+    # How the link was made: "search" | "manual" | "llm". Kept because an
+    # automatically-guessed link and one the owner confirmed are not equally
+    # trustworthy, and a wrong auto-link silently marks a step as handled.
+    method: str = Field(default="search", index=True)
+    confidence: float = 0.0
+    linked_at: datetime
+
+
+class Fact(SQLModel, table=True):
+    """A statement that is not an event, especially a future-dated one.
+
+    "Builder Club applications open mid-August" is not something that happened;
+    it is something that will be true. Events cannot express it, and without it
+    a date arriving can never itself be a trigger.
+
+    `valid_from` is the trigger: when it passes and the fact is still open,
+    that is a proposal with zero model calls to detect.
+    """
+
+    __tablename__ = "fact"
+
+    id: int | None = Field(default=None, primary_key=True)
+    statement: str = ""
+    # When this becomes true / stops being true. Either may be null.
+    valid_from: datetime | None = Field(default=None, index=True)
+    valid_until: datetime | None = Field(default=None, index=True)
+
+    # The EXTERNAL event this was learned from. A fact with no source event is
+    # not citable, by the same rule that governs everything else.
+    source_event_id: int | None = Field(default=None, foreign_key="event.id", index=True)
+    goal_id: int | None = Field(default=None, foreign_key="goal.id", index=True)
+    person_slug: str = Field(default="", index=True)
+
+    confidence: float = 0.0
+    # open | fired | expired | dismissed. `fired` means a proposal was already
+    # emitted for it, so the same date does not nag every single sweep.
+    status: str = Field(default="open", index=True)
+    created_at: datetime
+
+
+class PersonRole(SQLModel, table=True):
+    """What role a person plays relative to a specific goal.
+
+    The same person is not the same thing in two contexts. One contact can be
+    an `advocate` for a job goal and a `recommender` for an application goal,
+    and the right thing to ask them differs completely. Prep that ignores this
+    produces a generic dossier instead of "here is what to ask THIS person".
+    """
+
+    __tablename__ = "person_role"
+    __table_args__ = (
+        UniqueConstraint("person_slug", "goal_id", name="uq_person_goal_role"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    person_slug: str = Field(index=True)
+    goal_id: int = Field(foreign_key="goal.id", index=True)
+    # advocate | recommender | decision_maker | gatekeeper | collaborator |
+    # sponsor | mentor | contact
+    role: str = Field(default="contact", index=True)
+    note: str = ""
+    created_at: datetime
+
+
+class Edge(SQLModel, table=True):
+    """A typed, weighted link between two records. The graph.
+
+    Spreading activation needs edges. Without them Person, Goal, Commitment and
+    Event are four islands and a Deepgram job alert can never light up the
+    person who works there.
+
+    Weight is the decay multiplier applied when activation crosses this edge.
+    Storing it per-edge rather than per-type is what lets a strong link
+    (a commitment naming a person) carry further than a weak one (two people
+    who appeared in the same thread once).
+    """
+
+    __tablename__ = "edge"
+    __table_args__ = (
+        UniqueConstraint(
+            "src_type", "src_id", "dst_type", "dst_id", "relation", name="uq_edge"
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+
+    # "person" | "goal" | "commitment" | "event" | "fact"
+    src_type: str = Field(index=True)
+    src_id: str = Field(index=True)
+    dst_type: str = Field(index=True)
+    dst_id: str = Field(index=True)
+
+    # mentions | works_at | owes | about | attended | recommends | blocks ...
+    relation: str = Field(default="mentions", index=True)
+    weight: float = 0.5
+
+    # Which EXTERNAL event justified drawing this edge. An edge with no
+    # source cannot be cited, and an uncitable edge should not move a score.
+    source_event_id: int | None = Field(default=None, foreign_key="event.id", index=True)
+    created_at: datetime
+
+
+class ProposalRecord(SQLModel, table=True):
+    """A logged proposal and what the owner did about it.
+
+    Named ProposalRecord because `Proposal` is already the in-memory dataclass
+    the dispatcher consumes; this is its durable ledger row. Keeping them
+    separate stops the dispatcher's untrusted-input contract from acquiring a
+    database dependency.
+
+    Two axes, not one:
+      permission_tier  - how reversible is it        (auto/approve/never)
+      attention_level  - what does telling me cost   (silent/ambient/nudge/interrupt)
+
+    They are independent. A letter-of-rec nudge is `approve` + `interrupt`; a
+    LinkedIn request is `approve` + `ambient`. Collapsing them into one number
+    is what makes assistants that people switch off.
+    """
+
+    __tablename__ = "proposal"
+
+    id: int | None = Field(default=None, primary_key=True)
+    proposal_id: str = Field(index=True)
+
+    # What woke the system up: "event:123" | "sweep:deadline" | "fact:9".
+    trigger: str = Field(default="", index=True)
+    action_name: str = Field(default="", index=True)
+    args_json: str = "{}"
+
+    rationale: str = ""
+    # Comma-separated EXTERNAL event ids. Every claim must trace to one.
+    evidence_event_ids: str = ""
+    confidence: float = 0.0
+
+    permission_tier: str = Field(default="approve", index=True)
+    attention_level: str = Field(default="ambient", index=True)
+
+    # Suppressed proposals are STORED, not discarded. Once the system starts
+    # staying quiet its blind spots become invisible, so `--show-suppressed`
+    # needs something to show.
+    suppressed: bool = Field(default=False, index=True)
+
+    # pending | accepted | edited | dismissed | ignored | reversed
+    outcome: str = Field(default="pending", index=True)
+    outcome_at: datetime | None = None
+    # For `edited`: what the owner actually sent. The diff is the lesson.
+    outcome_note: str = ""
+
+    goal_id: int | None = Field(default=None, foreign_key="goal.id", index=True)
+    created_at: datetime = Field(index=True)
 
 
 class IngestState(SQLModel, table=True):
