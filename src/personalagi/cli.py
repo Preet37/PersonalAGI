@@ -163,6 +163,23 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     g_gaps.add_argument("--days", type=int, default=30, help="deadline window")
 
+    swp = sub.add_parser(
+        "sweep", help="proactive check: what did NOT happen that should have"
+    )
+    swp.add_argument(
+        "--dry-run", action="store_true",
+        help="report what would be raised without recording anything",
+    )
+    swp.add_argument(
+        "--show-suppressed", action="store_true",
+        help="include what fell below the confidence bar, so blind spots stay visible",
+    )
+    swp.add_argument("--budget", type=int, default=None, help="max model calls")
+    swp.add_argument(
+        "--only", default=None,
+        help="comma-separated kinds, e.g. deadline_gap,stale_commitment",
+    )
+
     owed = sub.add_parser("owed", help="open commitments, grouped by person")
     owed.add_argument(
         "--to-me",
@@ -525,6 +542,34 @@ def _cmd_goal(args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_sweep(args: argparse.Namespace) -> int:
+    from personalagi.records import CallBudget
+    from personalagi.sweep import (
+        AGENDA,
+        pending_proposals,
+        render_proposals,
+        sweep,
+    )
+
+    settings = get_settings()
+    kinds = tuple(k.strip() for k in args.only.split(",")) if args.only else AGENDA
+    budget = CallBudget(limit=args.budget) if args.budget is not None else None
+
+    result = sweep(settings, budget=budget, dry_run=args.dry_run, kinds=kinds)
+    print(result.summary())
+    print()
+
+    if args.dry_run:
+        for finding in result.findings:
+            bar = "surface " if finding.confidence >= settings.sweep_min_confidence else "suppress"
+            print(f"  [{bar}] {finding.confidence:.2f} {finding.kind}: {finding.detail}")
+        return 0
+
+    rows = pending_proposals(settings, include_suppressed=args.show_suppressed)
+    print(render_proposals(rows, show_suppressed=args.show_suppressed))
+    return 0
+
+
 def _cmd_owed(args: argparse.Namespace) -> int:
     from personalagi.commitments import list_owed, refresh_stale, render_owed
 
@@ -800,6 +845,7 @@ def main(argv: list[str] | None = None) -> int:
         "classify": _cmd_classify,
         "relevance": _cmd_relevance,
         "goal": _cmd_goal,
+        "sweep": _cmd_sweep,
         "owed": _cmd_owed,
         "done": _cmd_done,
         "labels-template": _cmd_labels_template,
