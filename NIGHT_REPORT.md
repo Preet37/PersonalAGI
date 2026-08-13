@@ -423,3 +423,81 @@ the gitignore bug: verify the artefact, not the intent.
 3. `goal add` your real goals. Two exist, both written by me as examples.
 4. Spot-check `prep` on three people you know well.
 5. Rotate the Groq key.
+
+---
+
+# Track feedback (26/27/28) + the FIX FIRST items
+
+**592 tests.** PR #4 merged.
+
+## The evidence linker had 0% precision, and only an audit showed it
+
+Word boundaries cut six false links to two. **Both survivors were still false.**
+`submit` and `application` are everywhere in a mailbox, so two common words
+looked like a two-thirds match while `cmu` — the only identifying word — was
+absent from both.
+
+| version | links | true | precision |
+|---|---|---|---|
+| substring | 6 | 0 | 0% |
+| word boundaries | 2 | 0 | 0% |
+| **+ IDF** | **1** | **1** | **100%** |
+
+The survivor is genuine: *"thank you for starting an application for the college
+of engineering at Carnegie Mellon University"*. Your CMU goal is now accurate —
+**application started and evidenced, letter of rec never asked and still a gap.**
+
+**The lesson is sharper than the bug.** Fixing the *mechanism* was not the same
+as fixing the *result*, and the gap between them was invisible except by reading
+output. That is now the fourth instance of the same family: broken gitignore
+looked like a clean tree, false evidence looked like a completed step, NULL
+provenance looked like a passing suite, and a fixed matcher looked like a fixed
+feature.
+
+## Migration guard
+
+`_assert_no_nulls` runs on every `init_db` and raises. Tests verify logic, not
+data state — this makes the count check a mechanism rather than a test someone
+remembers to write.
+
+## The feedback loop closes
+
+```
+sweep    -> 5 proposals in the ledger
+feedback -> 2 judged, acceptance 50%
+bias     -> +0.346 accepted-shaped   -0.320 dismissed-shaped
+```
+
+No training. Behaviour changes by showing the model its own track record.
+
+`ignored` is weighted lowest, because silence is ambiguous — you may not have
+looked. A suppressed proposal never ages out at all. `acceptance_rate` returns
+`None`, not 0%, when nothing is judged.
+
+`proposals --explore` shows suppressed items deliberately, so blind spots stay
+falsifiable.
+
+## Three bugs the real run found
+
+1. **`keywords()` dropped 2-char tokens, so "DJ" was filtered out** — your own
+   worked example returned nothing. Also killed "AI" and "ML".
+2. **Phone-number slugs became search terms**, matching unrelated events that
+   contained the digits.
+3. **You appeared as a discovered "person" in your own investigation.**
+
+## Still not built
+
+Tracks **sources** (30: chat/WhatsApp/LinkedIn exports) and **action** (32: send
+handler behind a fake transport; 33: Tauri shell). Trigger A rewrite (20),
+Fact records wired to the sweep (24 — the table and query exist, nothing writes
+Facts yet), contradiction detection (31).
+
+## Three things most likely wrong
+
+1. **IDF is tuned on one corpus and one true positive.** 100% precision on n=1
+   is the same statistical joke as the original `needs_response` recall.
+2. **`outcome_bias` is computed but not yet wired into anything.** It is
+   available; no caller adjusts confidence with it.
+3. **Investigation depth is untested against a real multi-hop question.** The
+   DJ chain works in fixtures; on your corpus it stopped at one hop because the
+   participants were unnamed phone handles.
