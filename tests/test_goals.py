@@ -269,7 +269,9 @@ class TestEvidenceSearch:
 
         assert without == []
         assert len(with_person) == 1
-        assert with_person[0].score == pytest.approx(0.75)
+        # Exact value depends on IDF weights over the corpus; what matters is
+        # that the bonus carried a genuine partial match over the bar.
+        assert with_person[0].score >= 0.6
 
     def test_the_person_bonus_cannot_rescue_a_zero_match(self, settings):
         """Without this floor every message a goal's person ever sent scores
@@ -459,3 +461,58 @@ class TestListing:
 
         assert list_goals(settings) == []
         assert len(list_goals(settings, status=None)) == 1
+
+
+class TestIdfWeighting:
+    """Word boundaries cut the volume of false links; IDF attacks the cause.
+
+    Audited after the boundary fix, BOTH surviving links on real data were
+    still false -- "Submit the CMU application" matched a credit-card promo,
+    because "submit" and "application" are everywhere and "cmu" was absent.
+    """
+
+    def test_a_common_word_match_no_longer_clears_the_bar(self, settings):
+        # A corpus where "application" and "submit" are everywhere.
+        for i in range(12):
+            add_event(settings, f"noise{i}", "Submit your application today!")
+
+        matches = find_evidence("Submit the CMU application", settings)
+
+        assert all("cmu" in m.matched for m in matches)
+
+    def test_the_distinctive_word_is_what_matches(self, settings):
+        for i in range(12):
+            add_event(settings, f"noise{i}", "Submit your application today")
+        add_event(settings, "real", "Submitting my CMU application now")
+
+        matches = find_evidence("Submit the CMU application", settings)
+
+        assert [m.event.source_id for m in matches] == ["real"]
+
+    def test_weights_stay_positive_on_a_tiny_corpus(self, settings):
+        """Plain log(total/seen) is 0 when a term is in every document, which
+        on a two-event corpus is every term -- scoring everything at zero."""
+        from personalagi.goal_evidence import inverse_document_frequency
+        from personalagi.models import Event
+
+        events = [
+            Event(source="x", source_id="a", title="", text="prospectus deck",
+                  timestamp=NOW, timestamp_ms=1, ingested_at=NOW),
+        ]
+        weights = inverse_document_frequency(["prospectus", "deck"], events)
+
+        assert all(w > 0 for w in weights.values())
+
+    def test_a_term_absent_from_the_corpus_still_has_weight(self, settings):
+        from personalagi.goal_evidence import inverse_document_frequency
+        from personalagi.models import Event
+
+        events = [
+            Event(source="x", source_id="a", title="", text="nothing relevant",
+                  timestamp=NOW, timestamp_ms=1, ingested_at=NOW),
+        ]
+        weights = inverse_document_frequency(["prospectus"], events)
+
+        # It carries the MOST weight: a word nobody else uses is the strongest
+        # possible identifier if it ever does appear.
+        assert weights["prospectus"] > 1.0

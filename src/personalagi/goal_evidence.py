@@ -21,6 +21,7 @@ confidence, and only manual ones are treated as certain.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -90,7 +91,55 @@ def keywords(text: str) -> list[str]:
     return [w for w in words if len(w) >= MIN_TERM_LENGTH and w not in STOPWORDS]
 
 
-def score_event(terms: list[str], event: Event, people: set[str]) -> EvidenceMatch:
+def inverse_document_frequency(
+    terms: list[str], events: list[Event]
+) -> dict[str, float]:
+    """How rare is each term in this corpus? Rare words carry the meaning.
+
+    Word boundaries removed the "newsletter contains letter" class of error but
+    did NOT make the linker correct. Audited afterwards, both surviving links
+    were still false:
+
+        "Submit the CMU application"  <-  "Thank you for starting an
+                                          application!"   (a different one)
+        "Submit the CMU application"  <-  "Earn more points in more ways"
+                                          (a credit card)
+
+    Because "submit" and "application" are everywhere in a mailbox, matching
+    two common words looked like a two-thirds match. "cmu" -- the word that
+    actually identifies the step -- was absent from both.
+
+    IDF fixes exactly that: a term appearing in most events tells you nothing,
+    a term appearing in three events is the whole signal. Free, no model call.
+    """
+    if not events:
+        return {t: 1.0 for t in terms}
+
+    total = len(events)
+    counts = {t: 0 for t in terms}
+    for event in events:
+        present = set(_WORD_RE.findall(f"{event.title or ''} {event.text or ''}".lower()))
+        for term in terms:
+            if term in present:
+                counts[term] += 1
+
+    weights: dict[str, float] = {}
+    for term, seen in counts.items():
+        # SMOOTHED, and the +1 is load-bearing. Plain log(total/seen) is 0 when
+        # a term appears in every document -- which on a two-event corpus is
+        # every term, making every weight 0 and every score 0. Smoothing keeps
+        # weights strictly positive so a small corpus degrades to plain
+        # proportional matching instead of matching nothing at all.
+        weights[term] = math.log((total + 1) / (seen + 1)) + 1.0
+    return weights
+
+
+def score_event(
+    terms: list[str],
+    event: Event,
+    people: set[str],
+    weights: dict[str, float] | None = None,
+) -> EvidenceMatch:
     """Fraction of the step's content words present, with a bonus for people.
 
     Matching is on WORD BOUNDARIES, not substrings. The first version used
@@ -111,7 +160,15 @@ def score_event(terms: list[str], event: Event, people: set[str]) -> EvidenceMat
     haystack = f"{event.title or ''}\n{event.text or ''}".lower()
     present = set(_WORD_RE.findall(haystack))
     hits = [t for t in terms if t in present]
-    score = len(hits) / len(terms)
+
+    if weights:
+        # Weighted by rarity: matching the one distinctive word beats matching
+        # three words every mailbox contains.
+        total = sum(weights.get(t, 0.0) for t in terms)
+        matched = sum(weights.get(t, 0.0) for t in hits)
+        score = (matched / total) if total > 0 else 0.0
+    else:
+        score = len(hits) / len(terms)
 
     # The bonus tops up a partial match; it can never carry a message that
     # shares no vocabulary at all. Without this floor, every message a goal's
@@ -158,9 +215,11 @@ def find_evidence(
                     participant.person_slug
                 )
 
+    candidates = events[: MAX_CANDIDATES * 20]
+    weights = inverse_document_frequency(terms, events)
     scored = [
-        score_event(terms, event, by_event_people.get(event.id, set()))
-        for event in events[:MAX_CANDIDATES * 20]
+        score_event(terms, event, by_event_people.get(event.id, set()), weights)
+        for event in candidates
     ]
     kept = [m for m in scored if m.score >= MIN_SCORE]
     kept.sort(key=lambda m: (-m.score, -m.event.timestamp_ms))

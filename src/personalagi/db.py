@@ -146,6 +146,49 @@ _BACKFILL_DEFAULTS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+class MigrationIncomplete(RuntimeError):
+    """A migration ran and left rows in a state the code cannot read.
+
+    Loud on purpose. The provenance migration failed SILENTLY: every existing
+    row went NULL, citable_events() matched 0 of 4,346, every test passed, and
+    the only symptom would have been the system quietly getting vaguer weeks
+    later. Tests verify logic; they do not verify data state. A migration needs
+    a count check, and the count check needs to be a mechanism rather than a
+    test somebody remembers to write.
+    """
+
+
+def _assert_no_nulls(engine: Engine) -> None:
+    """After backfilling, no _BACKFILL_DEFAULTS column may still be NULL.
+
+    Runs on every init_db. Cheap (one COUNT per column) and it converts the
+    worst failure mode in the system -- silent data loss that looks like
+    success -- into a startup crash.
+    """
+    with engine.begin() as conn:
+        for table, column, _ in _BACKFILL_DEFAULTS:
+            exists = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=:n",
+                {"n": table},
+            ).fetchone()
+            if not exists:
+                continue
+            columns = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")
+            }
+            if column not in columns:
+                continue
+            remaining = conn.exec_driver_sql(
+                f"SELECT count(*) FROM {table} WHERE {column} IS NULL"
+            ).scalar()
+            if remaining:
+                raise MigrationIncomplete(
+                    f"{table}.{column} still NULL on {remaining} row(s) after "
+                    f"backfill. Every query filtering on it is silently "
+                    f"excluding those rows."
+                )
+
+
 def _backfill_defaults(engine: Engine) -> list[str]:
     """Fill NULLs left by an additive migration. Idempotent."""
     filled: list[str] = []
@@ -184,6 +227,9 @@ def init_db(settings: Settings | None = None) -> Engine:
     _add_missing_columns(engine)
     # After the columns exist, never before.
     _backfill_defaults(engine)
+    # Then prove it worked. A migration that half-ran is worse than one that
+    # crashed, because it looks like it succeeded.
+    _assert_no_nulls(engine)
     return engine
 
 
