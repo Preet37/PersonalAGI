@@ -225,6 +225,17 @@ def _build_parser() -> argparse.ArgumentParser:
     inv.add_argument("--max-iterations", type=int, default=None)
     inv.add_argument("--budget", type=int, default=None)
 
+    imp = sub.add_parser(
+        "import", help="ingest an export file (Claude/ChatGPT/Gemini/WhatsApp/LinkedIn)"
+    )
+    imp.add_argument("path", type=Path)
+    imp.add_argument(
+        "--format", default=None,
+        choices=["claude", "chatgpt", "gemini", "whatsapp", "linkedin"],
+        help="override detection",
+    )
+    imp.add_argument("--dry-run", action="store_true")
+
     facts = sub.add_parser("facts", help="future-dated statements; a date is a trigger")
     facts_sub = facts.add_subparsers(dest="facts_command", required=True)
     f_ex = facts_sub.add_parser("extract", help="pull facts out of relevant events")
@@ -750,6 +761,22 @@ def _cmd_investigate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_import(args: argparse.Namespace) -> int:
+    from personalagi.adapters.exports import ExportError, ingest_export
+
+    try:
+        result = ingest_export(
+            args.path, get_settings(), fmt=args.format, dry_run=args.dry_run
+        )
+    except ExportError as exc:
+        print(f"error: {exc}")
+        return 2
+    print(result.summary())
+    if args.dry_run:
+        print("\n(dry run -- nothing was written)")
+    return 0
+
+
 def _cmd_facts(args: argparse.Namespace) -> int:
     from personalagi import facts as facts_mod
     from personalagi.records import CallBudget
@@ -1071,6 +1098,7 @@ def main(argv: list[str] | None = None) -> int:
         "feedback": _cmd_feedback,
         "proposals": _cmd_proposals,
         "investigate": _cmd_investigate,
+        "import": _cmd_import,
         "facts": _cmd_facts,
         "contradictions": _cmd_contradictions,
         "owed": _cmd_owed,

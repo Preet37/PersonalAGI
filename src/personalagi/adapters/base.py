@@ -59,6 +59,12 @@ class EventRecord:
     text: str = ""
     metadata: dict = field(default_factory=dict)
     participants: list[ParticipantRecord] = field(default_factory=list)
+    # EXTERNAL by default: almost every adapter reads records made by the
+    # world. The exception is an assistant transcript, where the owner's turns
+    # are external and the assistant's replies are GENERATED -- and if those
+    # were citable the system could ground a claim in an answer a model
+    # invented, which is the self-citation bug arriving through a new door.
+    provenance: str = "external"
 
     @property
     def sender(self) -> ParticipantRecord | None:
@@ -75,6 +81,7 @@ class EventRecord:
             "timestamp": self.timestamp,
             "timestamp_ms": self.timestamp_ms,
             "metadata_json": json.dumps(self.metadata, ensure_ascii=False, default=str),
+            "provenance": self.provenance,
             "ingested_at": ingested_at,
         }
         if event_id is not None:
