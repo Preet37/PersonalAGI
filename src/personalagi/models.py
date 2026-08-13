@@ -41,6 +41,35 @@ class Message(SQLModel, table=True):
     ingested_at: datetime
 
 
+class Classification(SQLModel, table=True):
+    """One classification per message.
+
+    Unique on message_id so re-classifying updates in place rather than
+    accumulating rows. `prompt_version` and `model` are stored on every row
+    because an eval number is meaningless without knowing which prompt and
+    model produced it.
+    """
+
+    __tablename__ = "classification"
+    __table_args__ = (UniqueConstraint("message_id", name="uq_classification_message"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    message_id: int = Field(foreign_key="message.id", index=True)
+
+    # needs_response | fyi | promotional | spam | unclassified
+    category: str = Field(index=True)
+    urgency: str = Field(default="low", index=True)
+    summary: str = ""
+
+    model: str = ""
+    prompt_version: str = ""
+    # False when the model failed twice and the row is a tombstone, so a
+    # parse failure is visible in the data instead of silently absent.
+    ok: bool = True
+    error: str | None = None
+    classified_at: datetime
+
+
 class IngestState(SQLModel, table=True):
     """Per-account sync cursors.
 

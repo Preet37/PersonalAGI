@@ -12,6 +12,7 @@ import argparse
 import logging
 import sys
 from datetime import date
+from pathlib import Path
 
 from personalagi.config import get_settings
 
@@ -62,6 +63,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--loop",
         action="store_true",
         help="repeat passes until no older mail remains",
+    )
+
+    classify = sub.add_parser("classify", help="classify ingested mail with Groq")
+    classify.add_argument("--account", default=None, help="account label; omit for all")
+    classify.add_argument("--limit", type=int, default=None, help="cap messages this run")
+    classify.add_argument(
+        "--reclassify",
+        action="store_true",
+        help="re-run messages that already have a classification",
+    )
+    classify.add_argument("--workers", type=int, default=None, help="concurrent Groq calls")
+    classify.add_argument("--dry-run", action="store_true")
+
+    template = sub.add_parser(
+        "labels-template",
+        help="generate a CSV of real messages for you to hand-label",
+    )
+    template.add_argument("--out", type=Path, default=Path("evals/labels_template.csv"))
+    template.add_argument("--n", type=int, default=30)
+    template.add_argument("--account", default=None)
+
+    ev = sub.add_parser("eval", help="score stored predictions against hand-labels")
+    ev.add_argument("--labels", type=Path, default=Path("evals/labels.csv"))
+    ev.add_argument(
+        "--classify-missing",
+        action="store_true",
+        help="classify any labelled message that has no prediction yet",
     )
 
     sub.add_parser("status", help="show per-account watermarks and counts")
@@ -142,6 +170,71 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_classify(args: argparse.Namespace) -> int:
+    from personalagi.llm.classify import classify_account
+
+    settings = get_settings()
+    if args.account and args.account not in settings.account_labels:
+        print(f"'{args.account}' is not in GMAIL_ACCOUNTS.", file=sys.stderr)
+        return 2
+
+    result = classify_account(
+        args.account,
+        settings,
+        limit=args.limit,
+        reclassify=args.reclassify,
+        workers=args.workers,
+        dry_run=args.dry_run,
+    )
+    print(result.summary())
+    return 0
+
+
+def _cmd_labels_template(args: argparse.Namespace) -> int:
+    from personalagi.evals.harness import generate_template
+
+    count = generate_template(args.out, get_settings(), n=args.n, account=args.account)
+    print(f"Wrote {count} rows to {args.out}")
+    print(
+        "\nFill in true_category (needs_response|fyi|promotional|spam) and\n"
+        "true_urgency (low|med|high), save as evals/labels.csv, then run:\n"
+        "  python -m personalagi eval --labels evals/labels.csv --classify-missing"
+    )
+    return 0
+
+
+def _cmd_eval(args: argparse.Namespace) -> int:
+    from personalagi.evals.harness import evaluate_labels, read_labels
+    from personalagi.evals.metrics import render_report
+
+    settings = get_settings()
+    labels = read_labels(args.labels)
+
+    if args.classify_missing:
+        from personalagi.llm.classify import classify_labelled
+
+        classify_labelled([row.message_id for row in labels], settings)
+
+    category_report, urgency_report, meta = evaluate_labels(labels, settings)
+
+    print(render_report(category_report, title="Category"))
+    print()
+    print(render_report(urgency_report, title="Urgency"))
+    print()
+    print(f"model={meta['model']}  prompt={meta['prompt_version']}")
+    print(f"labelled={meta['labelled']}  scored={meta['scored']}")
+    if meta["missing_prediction"]:
+        # Reported, never silently dropped: a shrinking denominator flatters
+        # every metric above.
+        print(
+            f"WARNING: {len(meta['missing_prediction'])} labelled message(s) had no "
+            "prediction and were excluded. Re-run with --classify-missing."
+        )
+    if meta["unclassified"]:
+        print(f"NOTE: {len(meta['unclassified'])} message(s) failed to parse twice.")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     from sqlmodel import Session
 
@@ -175,6 +268,9 @@ def main(argv: list[str] | None = None) -> int:
         "auth": _cmd_auth,
         "ingest": _cmd_ingest,
         "backfill": _cmd_backfill,
+        "classify": _cmd_classify,
+        "labels-template": _cmd_labels_template,
+        "eval": _cmd_eval,
         "status": _cmd_status,
     }
     try:

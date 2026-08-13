@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     # 0 = no cap. Useful for a first cautious run.
     ingest_max_messages: int = 0
 
+    # --- Classification ---
+    # Concurrent Groq calls. Kept low by default: Groq rate-limits per model
+    # per minute, and 429-then-backoff is slower than never hitting the limit.
+    classify_workers: int = 4
+    # Body characters sent to the model. See classify.BODY_CHAR_LIMIT.
+    classify_body_chars: int = 1500
+
     @property
     def account_labels(self) -> list[str]:
         return [label.strip() for label in self.gmail_accounts.split(",") if label.strip()]
