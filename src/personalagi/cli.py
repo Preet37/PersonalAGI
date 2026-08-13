@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from personalagi.config import get_settings
@@ -129,6 +129,39 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="report what stage A filters without making any LLM call",
     )
+
+    goal = sub.add_parser("goal", help="goals: the records that make absence a signal")
+    goal_sub = goal.add_subparsers(dest="goal_command", required=True)
+
+    g_add = goal_sub.add_parser("add", help="create a goal")
+    g_add.add_argument("title")
+    g_add.add_argument("--why", default="", help="why it matters; carried into nudges")
+    g_add.add_argument("--deadline", type=date.fromisoformat, default=None)
+    g_add.add_argument("--step", action="append", default=[], help="repeatable")
+    g_add.add_argument(
+        "--person", action="append", default=[],
+        help="slug:role, e.g. pratik:recommender. Repeatable.",
+    )
+
+    g_list = goal_sub.add_parser("list", help="goals, soonest deadline first")
+    g_list.add_argument("--all", action="store_true", help="include done/abandoned")
+
+    g_show = goal_sub.add_parser("show", help="one goal with its steps and evidence")
+    g_show.add_argument("slug")
+
+    goal_sub.add_parser("sync", help="rebuild the index from context/goals/*.md")
+
+    g_link = goal_sub.add_parser(
+        "link", help="search all sources for evidence supporting each open step"
+    )
+    g_link.add_argument("--goal", default=None, help="slug; omit for every goal")
+    g_link.add_argument("--limit", type=int, default=3, help="max links per step")
+    g_link.add_argument("--dry-run", action="store_true")
+
+    g_gaps = goal_sub.add_parser(
+        "gaps", help="open steps with no supporting evidence anywhere"
+    )
+    g_gaps.add_argument("--days", type=int, default=30, help="deadline window")
 
     owed = sub.add_parser("owed", help="open commitments, grouped by person")
     owed.add_argument(
@@ -402,6 +435,94 @@ def _cmd_relevance(args: argparse.Namespace) -> int:
         return 2
     print(result.summary())
     return 0
+
+
+def _cmd_goal(args: argparse.Namespace) -> int:
+    from personalagi import goals as goals_mod
+
+    settings = get_settings()
+    command = args.goal_command
+
+    if command == "add":
+        people = {}
+        for entry in args.person:
+            slug, _, role = entry.partition(":")
+            if slug.strip():
+                people[slug.strip()] = role.strip() or "contact"
+        try:
+            created = goals_mod.create_goal(
+                args.title, settings, why=args.why, deadline=args.deadline,
+                steps=args.step, people=people,
+            )
+        except goals_mod.GoalError as exc:
+            print(f"error: {exc}")
+            return 2
+        print(f"created {goals_mod.goal_path(settings, created.slug)}")
+        if not args.step:
+            print("No steps yet. A goal with no steps cannot have a gap, so it")
+            print("will never trigger anything -- add some with the file or --step.")
+        return 0
+
+    if command == "sync":
+        print(goals_mod.sync_goals(settings).summary())
+        return 0
+
+    if command == "list":
+        views = goals_mod.list_goals(settings, status=None if args.all else "active")
+        if not views:
+            print("No goals. `personalagi goal add \"...\"` to start.")
+            return 0
+        for view in views:
+            gaps = len(view.unevidenced_steps)
+            days = view.days_left
+            when = f"{days}d" if days is not None else "no deadline"
+            flag = f"  {gaps} step(s) with nothing behind them" if gaps else ""
+            print(f"{view.goal.slug:28} {when:>12}  {view.goal.title}{flag}")
+        return 0
+
+    if command == "show":
+        view = goals_mod.get_goal(args.slug, settings)
+        if view is None:
+            print(f"no goal '{args.slug}'")
+            return 1
+        print(goals_mod.render_goal(view))
+        return 0
+
+    if command == "link":
+        from personalagi.goal_evidence import link_evidence
+
+        result = link_evidence(
+            settings, goal_slug=args.goal, limit_per_step=args.limit,
+            dry_run=args.dry_run,
+        )
+        print(result.summary())
+        return 0
+
+    if command == "gaps":
+        from datetime import timedelta
+
+        cutoff = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=args.days)
+        found = False
+        for view in goals_mod.list_goals(settings):
+            missing = view.unevidenced_steps
+            if not missing:
+                continue
+            if view.goal.deadline and view.goal.deadline > cutoff:
+                continue
+            found = True
+            days = view.days_left
+            when = f"deadline in {days}d" if days is not None else "no deadline"
+            print(f"\n{view.goal.title}  ({when})")
+            for step in missing:
+                mark = "!!" if step.blocking else " -"
+                print(f"  {mark} {step.description}")
+        if not found:
+            print("No gaps inside the window.")
+            print("That is only meaningful if `goal link` has run -- otherwise it")
+            print("means nobody looked, not that nothing is missing.")
+        return 0
+
+    return 1
 
 
 def _cmd_owed(args: argparse.Namespace) -> int:
@@ -678,6 +799,7 @@ def main(argv: list[str] | None = None) -> int:
         "refresh-headers": _cmd_refresh_headers,
         "classify": _cmd_classify,
         "relevance": _cmd_relevance,
+        "goal": _cmd_goal,
         "owed": _cmd_owed,
         "done": _cmd_done,
         "labels-template": _cmd_labels_template,

@@ -22,12 +22,13 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlmodel import Session
 
 from personalagi.config import Settings, get_settings
 from personalagi.db import get_engine, init_db
-from personalagi.models import Commitment, Event
+from personalagi.models import Commitment, Event, Participant
+from personalagi.records import Provenance
 
 log = logging.getLogger(__name__)
 
@@ -50,15 +51,66 @@ class PersonOwed:
         return sum(1 for c in self.items if c.status == STALE)
 
 
-def refresh_stale(settings: Settings | None = None, *, now: datetime | None = None) -> int:
-    """Move open commitments past the age threshold to `stale`.
+def refresh_activity(settings: Settings | None = None) -> int:
+    """Push `last_activity_at` forward when a conversation has continued.
 
-    Age is measured from the promise, not from the last time anything happened
-    in the thread. That is a deliberate simplification and it over-reports:
-    a promise you fulfilled in a later message still goes stale. Making it
-    accurate needs thread-level follow-up detection, which is Stage 12 work.
-    The failure direction is right — a false "you still owe this" costs a
-    glance, a false silence costs the relationship.
+    Stage 17. The first version measured staleness from `promised_at`, so a
+    promise the owner fulfilled a week later still went stale on schedule and
+    nagged forever. What matters is whether anything has happened SINCE, so
+    any later event in the same thread — or with the same person, when there
+    is no thread — counts as activity.
+
+    Deliberately generous about what counts. A false "this moved" costs one
+    missed nudge; a false "nothing moved" costs the owner's trust in every
+    nudge, which is the failure that gets the system switched off.
+    """
+    settings = settings or get_settings()
+    init_db(settings)
+    changed = 0
+
+    with Session(get_engine(settings)) as session:
+        rows = list(
+            session.execute(
+                select(Commitment, Event).join(Event, Event.id == Commitment.event_id)
+            )
+        )
+        for commitment, source in rows:
+            latest = None
+            if source.thread_key:
+                latest = session.execute(
+                    select(func.max(Event.timestamp))
+                    .where(Event.thread_key == source.thread_key)
+                    .where(Event.timestamp > commitment.promised_at)
+                    .where(Event.provenance == Provenance.EXTERNAL)
+                ).scalar()
+
+            if latest is None and commitment.person_email:
+                # No thread: any later event involving the same person counts.
+                latest = session.execute(
+                    select(func.max(Event.timestamp))
+                    .join(Participant, Participant.event_id == Event.id)
+                    .where(Participant.address == commitment.person_email.lower())
+                    .where(Event.timestamp > commitment.promised_at)
+                    .where(Event.provenance == Provenance.EXTERNAL)
+                ).scalar()
+
+            newest = max(v for v in (latest, commitment.promised_at) if v is not None)
+            if commitment.last_activity_at != newest:
+                commitment.last_activity_at = newest
+                changed += 1
+        session.commit()
+
+    if changed:
+        log.info("refreshed last_activity_at on %d commitment(s)", changed)
+    return changed
+
+
+def refresh_stale(settings: Settings | None = None, *, now: datetime | None = None) -> int:
+    """Move commitments with no recent ACTIVITY to `stale`.
+
+    Measured from `last_activity_at`, not `promised_at` (stage 17). COALESCE to
+    promised_at so rows written before that column existed still behave — a
+    NULL must not read as "infinitely stale".
     """
     settings = settings or get_settings()
     init_db(settings)
@@ -70,7 +122,10 @@ def refresh_stale(settings: Settings | None = None, *, now: datetime | None = No
             update(Commitment)
             .where(Commitment.status == OPEN)
             .where(Commitment.manually_closed.is_(False))
-            .where(Commitment.promised_at < cutoff)
+            .where(
+                func.coalesce(Commitment.last_activity_at, Commitment.promised_at)
+                < cutoff
+            )
             .values(status=STALE)
         )
         session.commit()
@@ -163,7 +218,8 @@ def render_owed(groups: list[PersonOwed], *, direction: str = "i_owe") -> str:
         lines.append(f"{who}{contact}{flag}")
 
         for item in group.items:
-            age = (datetime.now(UTC).replace(tzinfo=None) - item.promised_at).days
+            since = item.last_activity_at or item.promised_at
+            age = (datetime.now(UTC).replace(tzinfo=None) - since).days
             due = f"  (said: {item.due_text})" if item.due_text else ""
             mark = "!" if item.status == STALE else "-"
             lines.append(f"  {mark} [{item.id}] {item.what}{due}   {age}d ago")
