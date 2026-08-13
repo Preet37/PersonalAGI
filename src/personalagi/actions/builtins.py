@@ -1,15 +1,25 @@
-"""The starting set of real actions, one per tier, to prove the shape.
+"""The starting set of real actions, one per tier.
 
-EVERY HANDLER IN THIS FILE IS INERT.
-------------------------------------
-Nothing here sends mail, deletes a file, writes to disk, or opens a socket.
-They validate their arguments and return a Result describing what a real
-implementation would do. This module runs unattended on a real machine, and an
-action registry is worth exactly nothing if wiring it up is what causes the
-first unintended send. Handlers get their real bodies one at a time, each with
-its own test, behind the tier that is already declared here.
+WHAT IS AND IS NOT INERT
+------------------------
+`draft_email` is REAL. It creates a Gmail draft through
+`users().drafts().create`, an API that cannot send. Everything else in this
+file is still a stub that validates its arguments and describes what a real
+implementation would do.
 
-The tiers below are the contract; the bodies are placeholders.
+That is the intended progression, not an inconsistency. Handlers get their
+real bodies one at a time, each with its own tests, behind a tier that was
+declared before the body existed. draft_email went first precisely because a
+draft is the most reversible externally-visible thing the system can produce:
+it sits in a folder until a human presses send.
+
+NOTHING IN THIS FILE SENDS ANYTHING.
+`send_email` and `create_calendar_event` remain stubs on purpose. You cannot
+un-send an email or un-invite eight people, so those handlers stay inert until
+someone is awake to watch the first one run. A test asserts that no send API
+appears anywhere in the codebase.
+
+The tiers are the contract; the bodies arrive behind them.
 """
 
 from __future__ import annotations
@@ -74,19 +84,73 @@ def append_context(person: str, text: str, source: str = "") -> Result:
 
 
 @action("draft_email", tier=Tier.AUTO)
-def draft_email(to: str, subject: str, body: str) -> Result:
-    """Compose a draft. AUTO because a draft is private and reversible.
+def draft_email(
+    to: str,
+    subject: str,
+    body: str,
+    account: str = "personal",
+    service=None,
+) -> Result:
+    """Create a real Gmail draft. AUTO because a draft is private and reversible.
 
-    Drafting and sending are two different actions at two different tiers, and
-    that separation is the entire reason this one can run without asking.
-    INERT: the draft is returned, not saved and certainly not sent.
+    THE ONLY NON-INERT HANDLER IN THIS FILE, and the tier separation is what
+    makes that acceptable: drafting and sending are two different actions at
+    two different tiers. `users().drafts().create` cannot send — sending is a
+    different API call that appears nowhere in this codebase.
+
+    Three things must be true before anything happens, checked in this order
+    because each produces a clearer message than the one after it:
+      1. There is a recipient.
+      2. The stored token actually grants gmail.compose. It currently grants
+         gmail.readonly, so today this returns a failure with instructions
+         rather than an HttpError 403 with a JSON body.
+      3. A Gmail service can be built.
+
+    `service` is injectable so the whole path is testable without a network.
     """
+    from personalagi.actions import gmail_write
+
+    # `sent: False` is on EVERY return path, success or failure. A caller
+    # inspecting this result must never have to distinguish "did not send"
+    # from "the key is missing because we failed early".
+    never_sent = {"to": to, "subject": subject, "created": False, "sent": False}
+
     if not to.strip():
-        return Result(ok=False, detail="draft_email needs a recipient")
+        return Result(
+            ok=False, detail="draft_email needs a recipient", data=never_sent
+        )
+
+    try:
+        raw = gmail_write.build_mime(to, subject, body)
+    except ValueError as exc:
+        return Result(ok=False, detail=str(exc), data=never_sent)
+
+    if service is None:
+        if not gmail_write.can_draft(account):
+            # Not an exception: a missing scope is an expected state today, and
+            # a proposal that cannot run should report that, not crash a batch.
+            return Result(
+                ok=False,
+                detail=gmail_write.scope_help(account),
+                data={**never_sent, "reason": "insufficient_scope"},
+            )
+        from personalagi.ingest.auth import build_service, load_credentials
+
+        service = build_service(load_credentials(account))
+
+    try:
+        created = gmail_write.create_draft(service, raw)
+    except Exception as exc:  # noqa: BLE001 - reported, never raised to the batch
+        return Result(
+            ok=False,
+            detail=f"draft creation failed: {str(exc)[:200]}",
+            data=never_sent,
+        )
+
     return Result(
         ok=True,
-        detail=f"drafted email to {to} ({len(body)} chars) — not sent",
-        data={"to": to, "subject": subject, "body": body, "sent": False},
+        detail=f"created Gmail draft to {to} ({len(body)} chars) — NOT sent",
+        data={**never_sent, "draft_id": created.get("id", ""), "created": True},
     )
 
 
