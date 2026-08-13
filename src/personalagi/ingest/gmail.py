@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -37,6 +37,8 @@ class IngestResult:
     skipped_duplicate: int = 0
     failed: int = 0
     history_expired: bool = False
+    truncated: bool = False
+    oldest_fetched_ms: int | None = None
 
     def summary(self) -> str:
         parts = [
@@ -50,6 +52,13 @@ class IngestResult:
             parts.append(f"failed={self.failed}")
         if self.history_expired:
             parts.append("(history expired, fell back to date query)")
+        if self.truncated:
+            # Loud on purpose: this is the condition whose silence made the
+            # original bootstrap bug invisible.
+            parts.append(
+                "TRUNCATED - older mail not fetched, run: "
+                f"personalagi backfill --account {self.account_label}"
+            )
         return "  ".join(parts)
 
 
@@ -80,6 +89,49 @@ def _insert_messages(session: Session, rows: list[dict]) -> int:
         result = session.execute(stmt)
         inserted += result.rowcount or 0
     return inserted
+
+
+def _fetch_and_normalize(
+    service,
+    label: str,
+    message_ids: list[str],
+    result: IngestResult,
+) -> tuple[list[dict], int | None, int | None]:
+    """Fetch and normalize a batch. Returns (rows, newest_ms, oldest_ms)."""
+    rows: list[dict] = []
+    newest_ms: int | None = None
+    oldest_ms: int | None = None
+
+    for message_id in message_ids:
+        try:
+            raw = fetch.get_message(service, message_id)
+        except Exception:
+            # One bad message must not abandon the batch; the cursor simply
+            # will not advance past it on this run.
+            log.exception("%s: failed to fetch message %s", label, message_id)
+            result.failed += 1
+            continue
+
+        normalized = normalize.normalize_message(raw, label)
+        rows.append(normalized.as_row())
+        result.fetched += 1
+
+        ms = normalized.internal_date_ms
+        if ms:
+            newest_ms = ms if newest_ms is None else max(newest_ms, ms)
+            oldest_ms = ms if oldest_ms is None else min(oldest_ms, ms)
+
+    return rows, newest_ms, oldest_ms
+
+
+def _finish(session: Session, state: IngestState, label: str) -> None:
+    """Stamp the sync time, refresh the count, and commit the cursor row."""
+    state.last_synced_at = datetime.now(UTC).replace(tzinfo=None)
+    state.message_count = session.execute(
+        select(func.count()).select_from(Message).where(Message.account_label == label)
+    ).scalar_one()
+    session.add(state)
+    session.commit()
 
 
 def ingest_account(
@@ -115,53 +167,162 @@ def ingest_account(
         mode=listing.mode,
         listed=len(listing.message_ids),
         history_expired=listing.history_expired,
+        truncated=listing.truncated,
     )
     log.info("%s: %d message(s) to fetch (mode=%s)", label, result.listed, listing.mode)
 
     if dry_run:
         return result
 
-    rows: list[dict] = []
-    max_internal_date = last_internal_date_ms or 0
-
-    for message_id in listing.message_ids:
-        try:
-            raw = fetch.get_message(service, message_id)
-        except Exception:
-            # One bad message must not abandon the batch; the watermark
-            # simply will not advance past it on this run.
-            log.exception("%s: failed to fetch message %s", label, message_id)
-            result.failed += 1
-            continue
-
-        normalized = normalize.normalize_message(raw, label)
-        rows.append(normalized.as_row())
-        result.fetched += 1
-        max_internal_date = max(max_internal_date, normalized.internal_date_ms)
+    rows, newest_ms, oldest_ms = _fetch_and_normalize(
+        service, label, listing.message_ids, result
+    )
+    result.oldest_fetched_ms = oldest_ms
 
     with Session(get_engine(settings)) as session:
         if rows:
             result.inserted = _insert_messages(session, rows)
             result.skipped_duplicate = len(rows) - result.inserted
 
-        # Commit the messages BEFORE advancing the watermark. A crash between
+        # Commit the messages BEFORE advancing any cursor. A crash between
         # the two re-fetches (cheap, deduped) instead of skipping (permanent).
         session.commit()
 
         state = _get_state(session, label)
+
+        # Forward cursor: we have everything newer than this.
         if listing.profile_history_id:
             state.last_history_id = listing.profile_history_id
-        if max_internal_date:
-            state.last_internal_date_ms = max_internal_date
-        state.last_synced_at = datetime.now(UTC).replace(tzinfo=None)
-        state.message_count = (
-            session.execute(
-                select(func.count()).select_from(Message).where(Message.account_label == label)
-            ).scalar_one()
+        if newest_ms:
+            state.last_internal_date_ms = max(newest_ms, state.last_internal_date_ms or 0)
+
+        # Backfill cursor only ever moves BACKWARD. An incremental forward run
+        # fetches recent mail, whose oldest message is newer than the stored
+        # floor; raising the floor there would erase the record of the hole.
+        if oldest_ms:
+            state.oldest_internal_date_ms = (
+                oldest_ms
+                if state.oldest_internal_date_ms is None
+                else min(state.oldest_internal_date_ms, oldest_ms)
+            )
+
+        state.last_run_truncated = listing.truncated
+        if listing.truncated:
+            # Explicitly false, not merely unset: we now KNOW mail is missing.
+            state.backfill_complete = False
+
+        _finish(session, state, label)
+
+    if listing.truncated:
+        log.warning(
+            "%s: listing truncated by cap - older mail was NOT fetched. "
+            "Run `personalagi backfill --account %s` to recover it.",
+            label,
+            label,
         )
-        session.add(state)
+    log.info(result.summary())
+    return result
+
+
+def backfill_account(
+    label: str,
+    settings: Settings | None = None,
+    *,
+    until: date | None = None,
+    max_messages: int | None = None,
+    dry_run: bool = False,
+) -> IngestResult:
+    """Walk backwards from the backfill cursor into older mail.
+
+    This is the recovery path for a bootstrap that a message cap truncated.
+    It never touches the forward cursor, so running it cannot cause new mail
+    to be missed.
+    """
+    settings = settings or get_settings()
+    limit = settings.ingest_max_messages if max_messages is None else max_messages
+
+    init_db(settings)
+    service = build_service(load_credentials(label, settings))
+
+    with Session(get_engine(settings)) as session:
+        state = _get_state(session, label)
+        cursor_ms = state.oldest_internal_date_ms
+        already_complete = state.backfill_complete
+
+        if cursor_ms is None:
+            # Self-heal: a DB written before the backfill cursor existed has
+            # messages but no floor. Derive it rather than refusing to run or,
+            # worse, re-pulling the whole mailbox.
+            cursor_ms = session.execute(
+                select(func.min(Message.internal_date_ms)).where(
+                    Message.account_label == label
+                )
+            ).scalar_one_or_none()
+            if cursor_ms:
+                log.info("%s: derived backfill cursor from stored mail", label)
+                state.oldest_internal_date_ms = cursor_ms
+                session.add(state)
+                session.commit()
+
+    result = IngestResult(account_label=label, mode="backfill")
+
+    if already_complete and until is None:
+        log.info("%s: backfill already complete, nothing older to fetch", label)
+        return result
+
+    if cursor_ms is None:
+        # Nothing ingested yet — there is no floor to walk back from.
+        log.warning("%s: no messages ingested yet; run `ingest` before `backfill`", label)
+        return result
+
+    until_epoch = None
+    if until is not None:
+        until_epoch = int(datetime(until.year, until.month, until.day, tzinfo=UTC).timestamp())
+
+    message_ids, truncated = fetch.list_backfill_message_ids(
+        service,
+        # `before:` is second-granularity and exclusive. Deliberately +1 so
+        # the boundary SECOND is re-listed: excluding it would permanently
+        # skip any message sharing that second with the cursor message.
+        # The cost is re-fetching the cursor message each pass, which dedupes
+        # to nothing. So convergence is measured by `inserted`, not `fetched`.
+        before_epoch_seconds=(cursor_ms // 1000) + 1,
+        until_epoch_seconds=until_epoch,
+        max_messages=limit,
+    )
+
+    result.listed = len(message_ids)
+    result.truncated = truncated
+    log.info("%s: %d older message(s) to fetch (backfill)", label, result.listed)
+
+    if dry_run:
+        return result
+
+    rows, _newest_ms, oldest_ms = _fetch_and_normalize(service, label, message_ids, result)
+    result.oldest_fetched_ms = oldest_ms
+
+    with Session(get_engine(settings)) as session:
+        if rows:
+            result.inserted = _insert_messages(session, rows)
+            result.skipped_duplicate = len(rows) - result.inserted
         session.commit()
 
+        state = _get_state(session, label)
+        if oldest_ms:
+            state.oldest_internal_date_ms = min(
+                state.oldest_internal_date_ms or oldest_ms, oldest_ms
+            )
+
+        # Complete only when the pass exhausted the query with no cap cutting
+        # it short. A bounded pass (--until) proves nothing about earlier mail.
+        if not truncated and until is None:
+            state.backfill_complete = True
+        state.last_run_truncated = truncated
+
+        _finish(session, state, label)
+
+    if truncated:
+        log.info("%s: more history remains, run backfill again to continue", label)
     log.info(result.summary())
     return result
 

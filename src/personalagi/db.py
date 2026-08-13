@@ -36,9 +36,45 @@ def get_engine(settings: Settings | None = None) -> Engine:
     return _engine
 
 
+def _add_missing_columns(engine: Engine) -> list[str]:
+    """Additive-only migration for tables that already exist.
+
+    create_all() creates missing tables but never alters existing ones, so a
+    DB created before a column was added silently lacks it. Only ever ADDs;
+    nothing here drops or rewrites data. If a change ever needs more than
+    this, delete data/ and reindex — it is derived (ARCHITECTURE.md D2).
+    """
+    added: list[str] = []
+    with engine.begin() as conn:
+        for table in SQLModel.metadata.sorted_tables:
+            exists = conn.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=:n",
+                {"n": table.name},
+            ).fetchone()
+            if not exists:
+                continue
+            present = {
+                row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table.name})")
+            }
+            for column in table.columns:
+                if column.name in present:
+                    continue
+                ddl = column.type.compile(engine.dialect)
+                default = "0" if "BOOLEAN" in ddl.upper() or "INTEGER" in ddl.upper() else "NULL"
+                if column.nullable:
+                    default = "NULL"
+                conn.exec_driver_sql(
+                    f"ALTER TABLE {table.name} ADD COLUMN {column.name} {ddl} "
+                    f"DEFAULT {default}"
+                )
+                added.append(f"{table.name}.{column.name}")
+    return added
+
+
 def init_db(settings: Settings | None = None) -> Engine:
     engine = get_engine(settings)
     SQLModel.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return engine
 
 

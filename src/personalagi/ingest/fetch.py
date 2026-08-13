@@ -40,6 +40,11 @@ class ListResult:
     # arriving mid-run has a higher id and is caught next run.
     profile_history_id: str | None = None
     history_expired: bool = False
+    # True when a message cap cut the listing short. Gmail lists newest-first,
+    # so the unfetched remainder is always OLDER than what we got — a hole in
+    # the past, reachable only via backfill. Without this flag the forward
+    # watermark reports "caught up" and the hole is invisible forever.
+    truncated: bool = False
 
 
 def _is_retryable(exc: HttpError) -> bool:
@@ -132,21 +137,21 @@ def _list_via_history(service, start_history_id: str, user_id: str = "me") -> li
     return list(dict.fromkeys(message_ids))
 
 
-def _list_via_query(
+def _run_query(
     service,
-    after_epoch_seconds: int,
+    query: str,
     max_messages: int = 0,
     user_id: str = "me",
-) -> list[str]:
-    """Fallback listing by internalDate.
+) -> tuple[list[str], bool]:
+    """Page a Gmail search query. Returns (message_ids, truncated).
 
-    Coarser than history: no deletions, no label changes. The `after:`
-    boundary is intentionally overlapped by the caller because mail is not
-    delivered in internalDate order.
+    `truncated` is True when a cap stopped us with results still pending.
+    Gmail returns newest-first, so a truncated listing means the remainder
+    is OLDER than everything fetched — a hole in the past, not the future.
+    Losing that distinction is what made the original bootstrap bug silent.
     """
     message_ids: list[str] = []
     page_token: str | None = None
-    query = f"after:{after_epoch_seconds}"
 
     while True:
         request = (
@@ -155,18 +160,60 @@ def _list_via_query(
             .list(userId=user_id, q=query, pageToken=page_token, maxResults=500)
         )
         response = execute(request)
+        page = response.get("messages", [])
 
-        for msg in response.get("messages", []):
-            message_ids.append(msg["id"])
+        for index, msg in enumerate(page):
             if max_messages and len(message_ids) >= max_messages:
-                log.info("hit ingest_max_messages cap of %d", max_messages)
-                return message_ids
+                # More results existed than we took: either more in this page
+                # or another page behind it.
+                remaining = len(page) - index > 0 or bool(response.get("nextPageToken"))
+                log.info("hit message cap of %d (more available: %s)", max_messages, remaining)
+                return message_ids, remaining
+            message_ids.append(msg["id"])
 
         page_token = response.get("nextPageToken")
         if not page_token:
             break
 
-    return message_ids
+        if max_messages and len(message_ids) >= max_messages:
+            return message_ids, True
+
+    return message_ids, False
+
+
+def _list_via_query(
+    service,
+    after_epoch_seconds: int,
+    max_messages: int = 0,
+    user_id: str = "me",
+) -> tuple[list[str], bool]:
+    """Fallback forward listing by internalDate.
+
+    Coarser than history: no deletions, no label changes. The `after:`
+    boundary is intentionally overlapped by the caller because mail is not
+    delivered in internalDate order.
+    """
+    return _run_query(service, f"after:{after_epoch_seconds}", max_messages, user_id)
+
+
+def list_backfill_message_ids(
+    service,
+    *,
+    before_epoch_seconds: int,
+    until_epoch_seconds: int | None = None,
+    max_messages: int = 0,
+    user_id: str = "me",
+) -> tuple[list[str], bool]:
+    """List messages OLDER than the backfill cursor, walking into the past.
+
+    This is the recovery path for a truncated bootstrap. Returns
+    (message_ids, truncated); truncated means there is still older mail
+    beyond this pass, so the cursor should be advanced and backfill re-run.
+    """
+    query = f"before:{before_epoch_seconds}"
+    if until_epoch_seconds is not None:
+        query = f"{query} after:{until_epoch_seconds}"
+    return _run_query(service, query, max_messages, user_id)
 
 
 def list_new_message_ids(
@@ -188,7 +235,10 @@ def list_new_message_ids(
     if last_history_id:
         ids = _list_via_history(service, last_history_id, user_id)
         if ids is not None:
-            result.message_ids = ids[:max_messages] if max_messages else ids
+            if max_messages and len(ids) > max_messages:
+                result.truncated = True
+                ids = ids[:max_messages]
+            result.message_ids = ids
             result.mode = "history"
             return result
         result.history_expired = True
@@ -201,7 +251,9 @@ def list_new_message_ids(
         after = int(cutoff.timestamp())
         result.mode = "bootstrap"
 
-    result.message_ids = _list_via_query(service, max(after, 0), max_messages, user_id)
+    result.message_ids, result.truncated = _list_via_query(
+        service, max(after, 0), max_messages, user_id
+    )
     return result
 
 

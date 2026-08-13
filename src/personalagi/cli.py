@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from datetime import date
 
 from personalagi.config import get_settings
 
@@ -42,6 +43,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="list what would be fetched, write nothing, leave the watermark alone",
+    )
+
+    backfill = sub.add_parser(
+        "backfill",
+        help="walk backwards into older mail a truncated bootstrap never fetched",
+    )
+    backfill.add_argument("--account", required=True, help="account label from GMAIL_ACCOUNTS")
+    backfill.add_argument(
+        "--until",
+        type=date.fromisoformat,
+        default=None,
+        help="stop at this date (YYYY-MM-DD); omit to walk to the beginning",
+    )
+    backfill.add_argument("--limit", type=int, default=None, help="cap messages this pass")
+    backfill.add_argument("--dry-run", action="store_true")
+    backfill.add_argument(
+        "--loop",
+        action="store_true",
+        help="repeat passes until no older mail remains",
     )
 
     sub.add_parser("status", help="show per-account watermarks and counts")
@@ -89,6 +109,39 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     return 1 if any(r.mode == "failed" for r in results) else 0
 
 
+def _cmd_backfill(args: argparse.Namespace) -> int:
+    from personalagi.ingest.gmail import backfill_account
+
+    settings = get_settings()
+    if args.account not in settings.account_labels:
+        print(
+            f"'{args.account}' is not in GMAIL_ACCOUNTS "
+            f"({', '.join(settings.account_labels)}).",
+            file=sys.stderr,
+        )
+        return 2
+
+    passes = 0
+    while True:
+        result = backfill_account(
+            args.account,
+            settings,
+            until=args.until,
+            max_messages=args.limit,
+            dry_run=args.dry_run,
+        )
+        passes += 1
+        print(result.summary())
+        # Stop on: not looping, nothing left, dry run, or no forward progress.
+        # Progress is `inserted`, not `fetched`: each pass re-reads the cursor
+        # second by design, so `fetched` is never 0 and would spin forever.
+        if not args.loop or not result.truncated or args.dry_run or result.inserted == 0:
+            break
+    if passes > 1:
+        print(f"({passes} backfill passes)")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     from sqlmodel import Session
 
@@ -118,7 +171,12 @@ def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     _configure_logging(args.verbose)
 
-    handlers = {"auth": _cmd_auth, "ingest": _cmd_ingest, "status": _cmd_status}
+    handlers = {
+        "auth": _cmd_auth,
+        "ingest": _cmd_ingest,
+        "backfill": _cmd_backfill,
+        "status": _cmd_status,
+    }
     try:
         return handlers[args.command](args)
     except Exception as exc:  # noqa: BLE001 - CLI boundary
