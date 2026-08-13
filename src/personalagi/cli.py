@@ -180,6 +180,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="comma-separated kinds, e.g. deadline_gap,stale_commitment",
     )
 
+    prep = sub.add_parser(
+        "prep", help="what you should know before meeting someone; every claim cited"
+    )
+    prep.add_argument("who", help="person slug or email")
+    prep.add_argument("--title", default="", help="what the meeting is about")
+
+    act = sub.add_parser(
+        "activate", help="what does this person or event connect to?"
+    )
+    act.add_argument("seed", help="person slug, or event:<id>")
+    act.add_argument("--depth", type=int, default=None)
+    act.add_argument("--limit", type=int, default=12)
+
+    sub.add_parser("build-edges", help="derive the graph from existing records")
+
+    meets = sub.add_parser("meetings", help="calendar events inside the next N hours")
+    meets.add_argument("--hours", type=int, default=24)
+
     owed = sub.add_parser("owed", help="open commitments, grouped by person")
     owed.add_argument(
         "--to-me",
@@ -570,6 +588,65 @@ def _cmd_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_build_edges(_: argparse.Namespace) -> int:
+    from personalagi.activate import build_edges
+
+    print(build_edges(get_settings()).summary())
+    return 0
+
+
+def _cmd_activate(args: argparse.Namespace) -> int:
+    from dataclasses import replace
+
+    from personalagi.activate import (
+        DEFAULT_ACTIVATION,
+        Node,
+        activate,
+        label_nodes,
+        render_activation,
+        seeds_for_event,
+    )
+    from personalagi.records import NodeType
+
+    settings = get_settings()
+    if args.seed.startswith("event:"):
+        seeds = seeds_for_event(int(args.seed.split(":", 1)[1]), settings)
+    else:
+        seeds = [Node(NodeType.PERSON, args.seed)]
+
+    limits = DEFAULT_ACTIVATION
+    if args.depth is not None:
+        limits = replace(limits, max_depth=args.depth)
+
+    lit = label_nodes(activate(seeds, settings, limits=limits), settings)
+    print(render_activation(lit, limit=args.limit))
+    return 0
+
+
+def _cmd_meetings(args: argparse.Namespace) -> int:
+    from personalagi.prep import upcoming_meetings
+
+    rows = upcoming_meetings(get_settings(), hours=args.hours)
+    if not rows:
+        print(f"No calendar events in the next {args.hours}h.")
+        print("(Calendar is built but not authorized -- `personalagi auth calendar`.)")
+        return 0
+    for row in rows:
+        print(f"{row.timestamp:%a %H:%M}  {row.title}  [{row.source_id}]")
+    return 0
+
+
+def _cmd_prep(args: argparse.Namespace) -> int:
+    from personalagi.prep import build_prep, render_prep
+
+    result = build_prep(args.who, get_settings(), title=args.title)
+    if result is None:
+        print(f"no person matching '{args.who}'")
+        return 1
+    print(render_prep(result))
+    return 0
+
+
 def _cmd_owed(args: argparse.Namespace) -> int:
     from personalagi.commitments import list_owed, refresh_stale, render_owed
 
@@ -846,6 +923,10 @@ def main(argv: list[str] | None = None) -> int:
         "relevance": _cmd_relevance,
         "goal": _cmd_goal,
         "sweep": _cmd_sweep,
+        "prep": _cmd_prep,
+        "activate": _cmd_activate,
+        "build-edges": _cmd_build_edges,
+        "meetings": _cmd_meetings,
         "owed": _cmd_owed,
         "done": _cmd_done,
         "labels-template": _cmd_labels_template,
