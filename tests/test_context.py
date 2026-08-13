@@ -357,7 +357,7 @@ class TestAutomatedRegressions:
             "dana@example.com",
             "sakshee@frontiermediahq.com",
             "prkaria@ucsc.edu",
-            "gmxgao@stanford.edu",
+            "grad-student@stanford.edu",
         ],
     )
     def test_real_people_still_pass(self, email):
