@@ -40,3 +40,8 @@ Read this before starting work; append your track's section when you finish.
   `Edge`, `ProposalRecord`; `Event.provenance`; `Commitment.last_activity_at`
   and `goal_id`. New `records.py`. Migration backfills provenance on existing
   rows — see the note in `db.py`, it failed silently the first time.
+
+- **Track loop** — added `activate.py` (edges + spreading activation) and
+  `prep.py` (meeting prep). **Touched `adapters/base.py`, which is outside this
+  track**, to fix shared-envelope identity — reported here per the rules.
+  Rationale in the commit; it was blocking `prep` on the Monday meeting.

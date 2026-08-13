@@ -121,7 +121,8 @@ def resolve_participant(
         record.is_automated = True
         record.automated_reason = "robot address pattern"
 
-    if not record.is_automated and normalized in shared:
+    is_shared = normalized in shared
+    if not record.is_automated and is_shared:
         record.is_automated = True
         record.automated_reason = "shared bulk envelope (many display names)"
 
@@ -130,5 +131,25 @@ def resolve_participant(
     # files for robots and with one fused file for 215 different people.
     if not record.is_automated and not record.is_owner:
         record.person_slug = slug_for(record.display_name, normalized)
+
+    elif is_shared and record.display_name and not record.is_owner:
+        # A SHARED ENVELOPE CARRIES A REAL PERSON'S NAME.
+        #
+        # LinkedIn sends every connection request from invitations@linkedin.com
+        # with the requester's name in the From header. Refusing to attach the
+        # ADDRESS is correct -- it would fuse 215 unrelated people into one
+        # file. But refusing the PERSON as well made all 215 of them invisible
+        # to the graph, including the one the owner is meeting on Monday:
+        #
+        #   ('invitations@linkedin.com', 'Arjun Sambamoorthy', '', 1, ...)
+        #
+        # On a shared envelope the display name IS the identity and the address
+        # is not. So the person is resolved from the name alone, and the
+        # address is deliberately never recorded against them.
+        #
+        # Scoped to SHARED addresses specifically, not to bulk mail generally:
+        # a newsletter has one constant display name, so it never qualifies and
+        # never gets a person file.
+        record.person_slug = slug_for(record.display_name, "")
 
     return record
