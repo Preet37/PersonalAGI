@@ -150,8 +150,7 @@ class TestAutomatedDetection:
         ],
     )
     def test_robots_detected(self, email):
-        # jobalerts-noreply matches on the 'alerts' prefix rule.
-        assert looks_automated(email) or "noreply" in email
+        assert looks_automated(email) is True
 
     @pytest.mark.parametrize(
         "email", ["dana@example.com", "sakshee@frontiermediahq.com", "preet@ucsc.edu"]
@@ -159,9 +158,18 @@ class TestAutomatedDetection:
     def test_humans_not_flagged(self, email):
         assert looks_automated(email) is False
 
-    def test_conservative_on_ambiguous(self):
-        """False positives lose a real person; false negatives cost a file."""
-        assert looks_automated("dana.noreply@example.com") is False
+    def test_marker_after_a_delimiter_now_counts(self):
+        """Deliberate reversal of the original prefix-only rule.
+
+        The prefix-only version missed jobalerts-noreply@linkedin.com (377
+        real messages). Nobody puts 'noreply' in a personal address, so
+        matching it anywhere is safe.
+        """
+        assert looks_automated("dana.noreply@example.com") is True
+
+    @pytest.mark.parametrize("email", ["alerta@example.com", "bouncer@example.com"])
+    def test_bounding_prevents_substring_false_positives(self, email):
+        assert looks_automated(email) is False
 
 
 class TestEntryText:
@@ -282,3 +290,72 @@ def test_token_estimate_is_monotonic():
 
 def test_person_path_layout(tmp_path):
     assert people_mod.person_path(Path("/ctx"), "x") == Path("/ctx/people/x.md")
+
+
+class TestSharedAddressDetection:
+    """Found in real data: invitations@linkedin.com carried 215 messages with
+    215 different display names. Keying identity on the address would fuse
+    hundreds of unrelated people into one person file."""
+
+    def _msg(self, email, name, mid=1):
+        return Message(
+            id=mid, gmail_id=f"g{mid}", thread_id="t", account_label="personal",
+            sender_name=name, sender_email=email, subject="s", body_text="b",
+            timestamp=datetime(2026, 8, 10), internal_date_ms=mid,
+            ingested_at=datetime(2026, 8, 10),
+        )
+
+    def test_many_names_on_one_address_is_shared(self):
+        from personalagi.context.store import shared_addresses
+
+        msgs = [
+            self._msg("invitations@linkedin.com", f"Person {i}", i) for i in range(6)
+        ]
+        assert "invitations@linkedin.com" in shared_addresses(msgs)
+
+    def test_one_person_with_many_messages_is_not_shared(self):
+        from personalagi.context.store import shared_addresses
+
+        msgs = [self._msg("dana@example.com", "Dana Okafor", i) for i in range(20)]
+        assert shared_addresses(msgs) == set()
+
+    def test_a_couple_of_name_spellings_is_not_shared(self):
+        """People legitimately change how their name renders."""
+        from personalagi.context.store import shared_addresses
+
+        msgs = [
+            self._msg("dana@example.com", "Dana Okafor", 1),
+            self._msg("dana@example.com", "dana okafor", 2),
+            self._msg("dana@example.com", "D. Okafor", 3),
+        ]
+        assert shared_addresses(msgs) == set()
+
+
+class TestAutomatedRegressions:
+    """Addresses from the real corpus that the first regex got wrong."""
+
+    @pytest.mark.parametrize(
+        "email",
+        [
+            "jobalerts-noreply@linkedin.com",      # 377 real messages
+            "jobs-noreply@linkedin.com",
+            "messaging-digest-noreply@linkedin.com",
+            "no-reply@accounts.google.com",
+            "noreply@login.planetfitness.com",
+            "donotreply@example.com",
+        ],
+    )
+    def test_robot_markers_caught_anywhere_in_the_local_part(self, email):
+        assert looks_automated(email) is True
+
+    @pytest.mark.parametrize(
+        "email",
+        [
+            "dana@example.com",
+            "sakshee@frontiermediahq.com",
+            "prkaria@ucsc.edu",
+            "gmxgao@stanford.edu",
+        ],
+    )
+    def test_real_people_still_pass(self, email):
+        assert looks_automated(email) is False

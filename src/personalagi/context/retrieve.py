@@ -1,0 +1,169 @@
+"""get_context: the retrieval contract for D3's two-layer files.
+
+Frontmatter and Profile are ALWAYS returned — cheap, stable identity.
+Log lines are returned selectively, top-k by FTS relevance. The whole log is
+never returned; that is the point of the design, and the reported token
+saving is how you check the design is actually doing its job.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from sqlalchemy import Engine
+
+from personalagi.config import Settings, get_settings
+from personalagi.context.people import PersonFile, iter_people, load_person, slugify
+from personalagi.db import get_engine, init_db
+from personalagi.search import fts
+
+log = logging.getLogger(__name__)
+
+# Rough conversion. English prose runs ~4 characters per token across common
+# BPE tokenizers. This is an ESTIMATE, not a tokenizer call: Groq's exact
+# tokenizer is not exposed locally and the ratio is only used to compare two
+# numbers produced the same way, where a constant factor cancels out.
+CHARS_PER_TOKEN = 4
+
+
+def estimate_tokens(text: str) -> int:
+    return (len(text) + CHARS_PER_TOKEN - 1) // CHARS_PER_TOKEN
+
+
+@dataclass
+class RetrievedContext:
+    slug: str
+    name: str
+    emails: list[str]
+    relationship: str
+    profile: str
+    log_lines: list[str] = field(default_factory=list)
+    total_log_lines: int = 0
+    query: str = ""
+
+    # Measurement, so "retrieval saves context" is a number not a claim.
+    tokens_returned: int = 0
+    tokens_if_full_log: int = 0
+
+    @property
+    def tokens_saved(self) -> int:
+        return max(0, self.tokens_if_full_log - self.tokens_returned)
+
+    @property
+    def saving_ratio(self) -> float:
+        if not self.tokens_if_full_log:
+            return 0.0
+        return self.tokens_saved / self.tokens_if_full_log
+
+    def render(self) -> str:
+        header = [
+            f"# {self.name}",
+            f"slug: {self.slug}",
+            f"emails: {', '.join(self.emails) if self.emails else '(none)'}",
+            f"relationship: {self.relationship}",
+            "",
+            "## Profile",
+            self.profile.strip() or "(no profile yet)",
+        ]
+        if self.log_lines:
+            header += [
+                "",
+                f"## Relevant log ({len(self.log_lines)} of {self.total_log_lines})",
+                *self.log_lines,
+            ]
+        return "\n".join(header)
+
+    def stats(self) -> str:
+        return (
+            f"tokens: {self.tokens_returned} returned  "
+            f"vs {self.tokens_if_full_log} for the full log  "
+            f"({self.saving_ratio:.0%} saved, "
+            f"{len(self.log_lines)}/{self.total_log_lines} lines)"
+        )
+
+
+def resolve_person(context_dir: Path, who: str) -> PersonFile | None:
+    """Find a person by slug, exact name, email, or unique partial name."""
+    direct = load_person(context_dir, who)
+    if direct:
+        return direct
+
+    direct = load_person(context_dir, slugify(who))
+    if direct:
+        return direct
+
+    needle = who.strip().lower()
+    partial: list[PersonFile] = []
+    for person in iter_people(context_dir):
+        if needle == person.name.lower() or needle in {e.lower() for e in person.emails}:
+            return person
+        if needle in person.name.lower() or needle in person.slug:
+            partial.append(person)
+
+    if len(partial) == 1:
+        return partial[0]
+    if len(partial) > 1:
+        # Ambiguity is reported, not guessed at — picking one silently is how
+        # a context system tells you confident things about the wrong person.
+        names = ", ".join(p.slug for p in partial[:6])
+        raise LookupError(f"'{who}' matches {len(partial)} people: {names}")
+    return None
+
+
+def get_context(
+    person: str,
+    query: str = "",
+    settings: Settings | None = None,
+    *,
+    k: int = 5,
+    engine: Engine | None = None,
+    context_dir: Path | None = None,
+) -> RetrievedContext | None:
+    """Frontmatter + profile always; top-k relevant log lines on demand."""
+    settings = settings or get_settings()
+    root = context_dir or settings.context_dir
+    engine = engine or get_engine(settings)
+    init_db(settings)
+
+    found = resolve_person(root, person)
+    if found is None:
+        return None
+
+    always_on = "\n".join(
+        [
+            found.name,
+            ", ".join(found.emails),
+            found.relationship,
+            found.profile,
+        ]
+    )
+
+    hits = []
+    if query:
+        hits = fts.search(engine, query, person_slug=found.slug, limit=k)
+
+    if not hits:
+        # No query, or nothing matched: fall back to the most recent lines,
+        # which is the sane default for "tell me about this person".
+        recent = found.sorted_log()[:k]
+        lines = [entry.render() for entry in recent]
+    else:
+        lines = [hit.render() for hit in hits]
+
+    full_log_text = "\n".join(entry.render() for entry in found.sorted_log())
+    returned_text = always_on + "\n" + "\n".join(lines)
+
+    return RetrievedContext(
+        slug=found.slug,
+        name=found.name,
+        emails=found.emails,
+        relationship=found.relationship,
+        profile=found.profile,
+        log_lines=lines,
+        total_log_lines=len(found.log),
+        query=query,
+        tokens_returned=estimate_tokens(returned_text),
+        tokens_if_full_log=estimate_tokens(always_on + "\n" + full_log_text),
+    )

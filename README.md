@@ -11,8 +11,11 @@ Each file has two layers:
 SQLite with FTS5 indexes the logs for search. The index is derived: delete
 `data/` and reindex and you lose nothing. No vector database yet.
 
-Status: Gmail ingest works (mail → SQLite). The vault, search, LLM layer, and
-API are still stubs.
+Status: stages 1–6 built and running against real Gmail. The desktop overlay,
+calendar/iMessage sources, and meeting transcripts are not started.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the decision record —
+what was chosen, what was rejected, and why.
 
 ## Layout
 
@@ -41,6 +44,27 @@ tests/
 data/              personalagi.db — derived, gitignored
 credentials/       OAuth client secret — gitignored
 tokens/            per-account OAuth tokens — gitignored
+```
+
+## The pipeline
+
+```bash
+python -m personalagi auth personal          # once per account (needs a browser)
+python -m personalagi ingest --account personal --limit 200
+python -m personalagi backfill --account personal --loop   # walk into older mail
+python -m personalagi classify --account personal
+python -m personalagi context-build          # mail -> context/people/*.md -> FTS
+python -m personalagi compact                # fold log entries into profiles
+python -m personalagi brief                  # what needs you today
+```
+
+Then to query it:
+
+```bash
+python -m personalagi context "Dana Okafor" --query "benchmark deadline"
+python -m personalagi search "harness draft"
+python -m personalagi correct dana-okafor "Dana left Example Labs in June 2026"
+python -m personalagi profile-history dana-okafor
 ```
 
 ## Setup

@@ -1,5 +1,9 @@
-credentials/
-tokens/
+# NOTE: the data patterns below are ANCHORED with a leading slash on purpose.
+# An unanchored `context/` matches a directory of that name at ANY depth, which
+# silently excluded the entire src/personalagi/context/ source package from
+# every commit. Anchor anything that names a top-level data directory.
+/credentials/
+/tokens/
 .env
 *.db
 __pycache__/
@@ -7,13 +11,13 @@ __pycache__/
 
 # The vault: real names, addresses, and private correspondence. Never committed.
 # See context.example/ for the structure.
-context/
+/context/
 
 # Derived artifacts — rebuildable from context/ by reindexing.
-data/
+/data/
 
 # Rendered briefs summarise private correspondence.
-briefs/
+/briefs/
 
 # Hand-labelled eval data references real messages by subject and excerpt.
 evals/labels.csv
