@@ -89,25 +89,27 @@ API that structurally cannot send. Nothing else was made live.
 
 ## D1 is no longer a claim. Here is the evidence.
 
-Three people now hold an email address **and** a phone number in one file:
+Three people now hold an email address **and** a phone number in one file.
+Real identifiers are redacted here because this repo is on GitHub and these
+are other people's contact details, not mine:
 
 ```yaml
-# context/people/harsh-karia.md
-emails: [harshkaria108@gmail.com, hnkaria@ucdavis.edu]
-phones: ['+16693362170']
+# context/people/<a-friend>.md   (real values redacted for the public repo)
+emails: [<personal>@gmail.com, <same-person>@ucdavis.edu]
+phones: ['+1<redacted>']
 ```
 
-`kunjal-purohit` has 42 entries across both sources. And `owed` now lists a
+A second friend's file has 42 entries across both sources. And `owed` now lists a
 commitment that arrived **by phone number**, filed against the person file that
 email built:
 
 ```
-Kunjal Purohit <+15102982781>
+<a friend> <+1<redacted>>
   - [18] resend the link   0d ago
       "wait lemme resend the link twin"
 ```
 
-The path is `+1510... → Contacts → "Kunjal Purohit" → slug kunjal-purohit →
+The path is `+1XXX... → Contacts → "<their name>" → slug <their-slug> →
 the same markdown file`. Without Contacts a phone number can only ever be its
 own orphan, and the cross-source premise fails silently. 1,779 contact
 identifiers loaded, 312 of 348 handles resolved to a name.

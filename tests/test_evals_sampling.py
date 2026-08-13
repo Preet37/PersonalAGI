@@ -90,7 +90,7 @@ class TestIdentity:
             assert is_human_sender(email) is False
 
     def test_real_people_are_human(self):
-        for email in ["gmxgao@stanford.edu", "ryan@westfuller.com", "dana@example.com"]:
+        for email in ["grad-student@stanford.edu", "ryan@westfuller.com", "dana@example.com"]:
             assert is_human_sender(email) is True
 
     def test_a_shared_envelope_is_not_a_person_even_with_a_clean_address(self):
@@ -122,7 +122,7 @@ class TestHumanOnlySampling:
             [
                 ("jobalerts-noreply@linkedin.com", "LinkedIn", "promotional"),
                 ("no-reply@stripe.com", "Stripe", "fyi"),
-                ("gmxgao@stanford.edu", "Grace", "needs_response"),
+                ("grad-student@stanford.edu", "Grace", "needs_response"),
                 ("ryan@westfuller.com", "Ryan", "needs_response"),
             ],
         )
@@ -130,14 +130,14 @@ class TestHumanOnlySampling:
 
         generate_template(out, settings, n=10, human_only=True)
 
-        assert set(senders_in(out)) == {"gmxgao@stanford.edu", "ryan@westfuller.com"}
+        assert set(senders_in(out)) == {"grad-student@stanford.edu", "ryan@westfuller.com"}
 
     def test_without_the_flag_the_old_behaviour_is_unchanged(self, settings, tmp_path):
         seed(
             settings,
             [
                 ("jobalerts-noreply@linkedin.com", "LinkedIn", "promotional"),
-                ("gmxgao@stanford.edu", "Grace", "needs_response"),
+                ("grad-student@stanford.edu", "Grace", "needs_response"),
             ],
         )
         out = tmp_path / "t.csv"
@@ -164,7 +164,7 @@ class TestStratifiedSampling:
         sample gets none of the class that matters; stratified it gets both.
         """
         rows = [
-            ("gmxgao@stanford.edu", "Grace", "needs_response"),
+            ("grad-student@stanford.edu", "Grace", "needs_response"),
             ("ryan@westfuller.com", "Ryan", "needs_response"),
         ]
         rows += [(f"bulk{i}@brand{i}.com", f"Brand {i}", "promotional") for i in range(40)]
@@ -174,8 +174,8 @@ class TestStratifiedSampling:
         generate_template(flat, settings, n=10)
         generate_template(balanced, settings, n=10, stratify=True)
 
-        assert "gmxgao@stanford.edu" not in senders_in(flat)
-        assert {"gmxgao@stanford.edu", "ryan@westfuller.com"} <= set(
+        assert "grad-student@stanford.edu" not in senders_in(flat)
+        assert {"grad-student@stanford.edu", "ryan@westfuller.com"} <= set(
             senders_in(balanced)
         )
 
