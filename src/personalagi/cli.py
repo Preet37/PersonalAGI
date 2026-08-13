@@ -82,6 +82,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="re-project every message, not only those without an event",
     )
 
+    cal = sub.add_parser(
+        "calendar",
+        help="ingest Google Calendar as Events (needs `auth calendar` first)",
+    )
+    cal.add_argument("--days-back", type=int, default=30)
+    cal.add_argument("--days-forward", type=int, default=60)
+    cal.add_argument("--calendar-id", default="primary")
+
     ims = sub.add_parser(
         "imessage",
         help="ingest iMessage as Events (read-only snapshot of chat.db)",
@@ -304,6 +312,23 @@ def _cmd_sync_events(args: argparse.Namespace) -> int:
         rebuild=args.rebuild,
     )
     print(f"{events} event(s), {participants} participant(s)")
+    return 0
+
+
+def _cmd_calendar(args: argparse.Namespace) -> int:
+    from personalagi.adapters.calendar import CalendarNotAuthorized, sync_calendar
+
+    try:
+        result = sync_calendar(
+            get_settings(),
+            calendar_id=args.calendar_id,
+            days_back=args.days_back,
+            days_forward=args.days_forward,
+        )
+    except CalendarNotAuthorized as exc:
+        print(f"calendar not authorized:\n{exc}")
+        return 2
+    print(result.summary())
     return 0
 
 
@@ -649,6 +674,7 @@ def main(argv: list[str] | None = None) -> int:
         "backfill": _cmd_backfill,
         "sync-events": _cmd_sync_events,
         "imessage": _cmd_imessage,
+        "calendar": _cmd_calendar,
         "refresh-headers": _cmd_refresh_headers,
         "classify": _cmd_classify,
         "relevance": _cmd_relevance,
