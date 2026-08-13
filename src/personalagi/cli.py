@@ -41,6 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=None, help="cap messages this run (0 = no cap)"
     )
     ingest.add_argument(
+        "--workers", type=int, default=None,
+        help="concurrent message fetches (default 1; each thread gets its own client)",
+    )
+    ingest.add_argument(
         "--dry-run",
         action="store_true",
         help="list what would be fetched, write nothing, leave the watermark alone",
@@ -59,6 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backfill.add_argument("--limit", type=int, default=None, help="cap messages this pass")
     backfill.add_argument("--dry-run", action="store_true")
+    backfill.add_argument("--workers", type=int, default=None, help="concurrent fetches")
     backfill.add_argument(
         "--loop",
         action="store_true",
@@ -137,6 +142,12 @@ def _build_parser() -> argparse.ArgumentParser:
     history = sub.add_parser("profile-history", help="show how a profile evolved")
     history.add_argument("person")
 
+    brief = sub.add_parser("brief", help="render the morning brief")
+    brief.add_argument("--days", type=int, default=1, help="window size in days")
+    brief.add_argument("--date", type=date.fromisoformat, default=None)
+    brief.add_argument("--account", action="append", default=None)
+    brief.add_argument("--no-write", action="store_true", help="print only")
+
     sub.add_parser("status", help="show per-account watermarks and counts")
     return parser
 
@@ -162,7 +173,10 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
     settings = get_settings()
     if args.all:
-        results = ingest_all(settings, max_messages=args.limit, dry_run=args.dry_run)
+        results = ingest_all(
+            settings, max_messages=args.limit, dry_run=args.dry_run,
+            fetch_workers=args.workers,
+        )
     else:
         if args.account not in settings.account_labels:
             print(
@@ -173,7 +187,8 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
             return 2
         results = [
             ingest_account(
-                args.account, settings, max_messages=args.limit, dry_run=args.dry_run
+                args.account, settings, max_messages=args.limit,
+                dry_run=args.dry_run, fetch_workers=args.workers,
             )
         ]
 
@@ -202,6 +217,7 @@ def _cmd_backfill(args: argparse.Namespace) -> int:
             until=args.until,
             max_messages=args.limit,
             dry_run=args.dry_run,
+            fetch_workers=args.workers,
         )
         passes += 1
         print(result.summary())
@@ -415,6 +431,20 @@ def _cmd_profile_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_brief(args: argparse.Namespace) -> int:
+    from personalagi.brief import build_brief, render_brief, write_brief
+
+    settings = get_settings()
+    brief = build_brief(
+        settings, day=args.date, window_days=args.days, accounts=args.account
+    )
+    print(render_brief(brief))
+    if not args.no_write:
+        path = write_brief(brief, settings)
+        print(f"\n(written to {path})")
+    return 0
+
+
 def _cmd_status(_: argparse.Namespace) -> int:
     from sqlmodel import Session
 
@@ -458,6 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         "compact": _cmd_compact,
         "correct": _cmd_correct,
         "profile-history": _cmd_profile_history,
+        "brief": _cmd_brief,
         "status": _cmd_status,
     }
     try:

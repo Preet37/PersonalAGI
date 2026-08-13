@@ -26,6 +26,8 @@ class Settings(BaseSettings):
 
     # --- Storage ---
     context_dir: Path = Path("context")
+    # Rendered briefs. Gitignored: they summarise private correspondence.
+    briefs_dir: Path = Path("briefs")
     database_url: str = "sqlite:///data/personalagi.db"
 
     # --- API ---
@@ -41,6 +43,12 @@ class Settings(BaseSettings):
     ingest_overlap_seconds: int = 86_400
     # 0 = no cap. Useful for a first cautious run.
     ingest_max_messages: int = 0
+    # Concurrent messages.get calls. Default 1 (sequential) because it is
+    # the proven path; >1 gives each thread its own Gmail client because
+    # googleapiclient's http layer is not thread-safe. 2000 sequential
+    # fetches measured ~50 minutes, so raising this is the single biggest
+    # speedup available to ingest.
+    fetch_workers: int = 1
 
     # --- Classification ---
     # Concurrent Groq calls. Kept low by default: Groq rate-limits per model

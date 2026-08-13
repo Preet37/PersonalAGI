@@ -12,6 +12,13 @@ context/
 # Derived artifacts — rebuildable from context/ by reindexing.
 data/
 
+# Rendered briefs summarise private correspondence.
+briefs/
+
+# Hand-labelled eval data references real messages by subject and excerpt.
+evals/labels.csv
+evals/labels_template.csv
+
 # Python / tooling
 *.py[cod]
 .pytest_cache/

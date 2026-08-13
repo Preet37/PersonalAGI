@@ -276,3 +276,76 @@ class TestBackfill:
         result = gmail.backfill_account("personal", settings)
         assert result.fetched == 0
         assert stored(settings) == []
+
+
+class TestConcurrentFetch:
+    """workers>1 must give each thread its own Gmail client.
+
+    googleapiclient's http layer is not thread-safe; sharing one service
+    across threads corrupts responses intermittently, which is the worst
+    possible failure mode for an ingest pipeline.
+    """
+
+    def test_each_thread_builds_its_own_service(self, env, monkeypatch):
+        settings, service = env
+        import threading
+
+        built = []
+        seen_threads = []
+
+        def factory():
+            built.append(1)
+            seen_threads.append(threading.current_thread().name)
+            return FakeService(build_corpus())
+
+        result = gmail.IngestResult(account_label="personal", mode="test")
+        rows, newest, oldest = gmail._fetch_and_normalize(
+            service, "personal", [f"m{i}" for i in range(10)], result,
+            workers=4, service_factory=factory,
+        )
+
+        assert len(rows) == 10
+        assert result.fetched == 10
+        # One client per worker thread that ran, never one shared client.
+        assert len(built) == len(set(seen_threads))
+
+    def test_sequential_path_ignores_the_factory(self, env):
+        settings, service = env
+        built = []
+        result = gmail.IngestResult(account_label="personal", mode="test")
+
+        gmail._fetch_and_normalize(
+            service, "personal", ["m0", "m1"], result,
+            workers=1, service_factory=lambda: built.append(1),
+        )
+        assert built == []
+        assert result.fetched == 2
+
+    def test_concurrent_results_match_sequential(self, env):
+        settings, service = env
+        ids = [f"m{i}" for i in range(10)]
+
+        seq_result = gmail.IngestResult(account_label="personal", mode="s")
+        seq_rows, seq_new, seq_old = gmail._fetch_and_normalize(
+            service, "personal", ids, seq_result
+        )
+
+        par_result = gmail.IngestResult(account_label="personal", mode="p")
+        par_rows, par_new, par_old = gmail._fetch_and_normalize(
+            service, "personal", ids, par_result,
+            workers=4, service_factory=lambda: FakeService(build_corpus()),
+        )
+
+        assert [r["gmail_id"] for r in seq_rows] == [r["gmail_id"] for r in par_rows]
+        assert (seq_new, seq_old) == (par_new, par_old)
+
+    def test_one_failure_does_not_abandon_the_batch(self, env):
+        settings, service = env
+        result = gmail.IngestResult(account_label="personal", mode="test")
+
+        rows, _, _ = gmail._fetch_and_normalize(
+            service, "personal", ["m0", "does-not-exist", "m1"], result,
+            workers=2, service_factory=lambda: FakeService(build_corpus()),
+        )
+        assert len(rows) == 2
+        assert result.failed == 1

@@ -8,6 +8,9 @@ normalize.py know nothing about each other.
 from __future__ import annotations
 
 import logging
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
@@ -96,23 +99,59 @@ def _fetch_and_normalize(
     label: str,
     message_ids: list[str],
     result: IngestResult,
+    *,
+    workers: int = 1,
+    service_factory: Callable[[], object] | None = None,
 ) -> tuple[list[dict], int | None, int | None]:
-    """Fetch and normalize a batch. Returns (rows, newest_ms, oldest_ms)."""
+    """Fetch and normalize a batch. Returns (rows, newest_ms, oldest_ms).
+
+    Sequential by default. `workers > 1` needs a service_factory because
+    googleapiclient's underlying httplib2.Http is NOT thread-safe — sharing
+    one service across threads corrupts responses intermittently, which is
+    the worst possible failure mode for an ingest pipeline. Each thread
+    therefore builds and keeps its own client.
+    """
     rows: list[dict] = []
     newest_ms: int | None = None
     oldest_ms: int | None = None
 
-    for message_id in message_ids:
+    local = threading.local()
+    # The factory is only consulted when we actually fan out. Otherwise the
+    # caller's existing client is reused - building a second one on the
+    # default sequential path would be pure waste.
+    concurrent = workers > 1 and service_factory is not None
+
+    def client_for_thread():
+        if not concurrent:
+            return service
+        existing = getattr(local, "service", None)
+        if existing is None:
+            existing = service_factory()
+            local.service = existing
+        return existing
+
+    def fetch_one(message_id: str):
         try:
-            raw = fetch.get_message(service, message_id)
+            raw = fetch.get_message(client_for_thread(), message_id)
         except Exception:
             # One bad message must not abandon the batch; the cursor simply
             # will not advance past it on this run.
             log.exception("%s: failed to fetch message %s", label, message_id)
+            return None
+        return normalize.normalize_message(raw, label)
+
+    if concurrent:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            normalized_all = list(pool.map(fetch_one, message_ids))
+    else:
+        normalized_all = [fetch_one(mid) for mid in message_ids]
+
+    # Accumulation stays single-threaded, so no locking is needed here.
+    for normalized in normalized_all:
+        if normalized is None:
             result.failed += 1
             continue
 
-        normalized = normalize.normalize_message(raw, label)
         rows.append(normalized.as_row())
         result.fetched += 1
 
@@ -140,6 +179,7 @@ def ingest_account(
     *,
     max_messages: int | None = None,
     dry_run: bool = False,
+    fetch_workers: int | None = None,
 ) -> IngestResult:
     """Pull new messages for one account and store them."""
     settings = settings or get_settings()
@@ -175,7 +215,12 @@ def ingest_account(
         return result
 
     rows, newest_ms, oldest_ms = _fetch_and_normalize(
-        service, label, listing.message_ids, result
+        service,
+        label,
+        listing.message_ids,
+        result,
+        workers=fetch_workers or settings.fetch_workers,
+        service_factory=lambda: build_service(load_credentials(label, settings)),
     )
     result.oldest_fetched_ms = oldest_ms
 
@@ -231,6 +276,7 @@ def backfill_account(
     until: date | None = None,
     max_messages: int | None = None,
     dry_run: bool = False,
+    fetch_workers: int | None = None,
 ) -> IngestResult:
     """Walk backwards from the backfill cursor into older mail.
 
@@ -298,7 +344,14 @@ def backfill_account(
     if dry_run:
         return result
 
-    rows, _newest_ms, oldest_ms = _fetch_and_normalize(service, label, message_ids, result)
+    rows, _newest_ms, oldest_ms = _fetch_and_normalize(
+        service,
+        label,
+        message_ids,
+        result,
+        workers=fetch_workers or settings.fetch_workers,
+        service_factory=lambda: build_service(load_credentials(label, settings)),
+    )
     result.oldest_fetched_ms = oldest_ms
 
     with Session(get_engine(settings)) as session:
@@ -332,6 +385,7 @@ def ingest_all(
     *,
     max_messages: int | None = None,
     dry_run: bool = False,
+    fetch_workers: int | None = None,
 ) -> list[IngestResult]:
     """Ingest every account in GMAIL_ACCOUNTS, in order.
 
@@ -343,7 +397,10 @@ def ingest_all(
     for label in settings.account_labels:
         try:
             results.append(
-                ingest_account(label, settings, max_messages=max_messages, dry_run=dry_run)
+                ingest_account(
+                    label, settings, max_messages=max_messages,
+                    dry_run=dry_run, fetch_workers=fetch_workers,
+                )
             )
         except Exception as exc:
             log.error("%s: ingest failed: %s", label, exc)
