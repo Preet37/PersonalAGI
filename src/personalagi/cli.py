@@ -88,6 +88,16 @@ def _build_parser() -> argparse.ArgumentParser:
     template.add_argument("--out", type=Path, default=Path("evals/labels_template.csv"))
     template.add_argument("--n", type=int, default=30)
     template.add_argument("--account", default=None)
+    template.add_argument(
+        "--human-only",
+        action="store_true",
+        help="sample only human senders (drops robot and shared bulk addresses)",
+    )
+    template.add_argument(
+        "--stratify",
+        action="store_true",
+        help="balance the sample across predicted categories",
+    )
 
     ev = sub.add_parser("eval", help="score stored predictions against hand-labels")
     ev.add_argument("--labels", type=Path, default=Path("evals/labels.csv"))
@@ -254,8 +264,23 @@ def _cmd_classify(args: argparse.Namespace) -> int:
 def _cmd_labels_template(args: argparse.Namespace) -> int:
     from personalagi.evals.harness import generate_template
 
-    count = generate_template(args.out, get_settings(), n=args.n, account=args.account)
+    count = generate_template(
+        args.out,
+        get_settings(),
+        n=args.n,
+        account=args.account,
+        human_only=args.human_only,
+        stratify=args.stratify,
+    )
     print(f"Wrote {count} rows to {args.out}")
+    if args.human_only or args.stratify:
+        # Say this at the point of use, not only in a doc nobody rereads: a
+        # balanced sample measures separability, not what the inbox looks like.
+        print(
+            "\nNOTE: this sample is filtered/balanced, so its class frequencies\n"
+            "are NOT your inbox's. Per-class precision and recall are still\n"
+            "meaningful; overall accuracy is not comparable to a random sample."
+        )
     print(
         "\nFill in true_category (needs_response|fyi|promotional|spam) and\n"
         "true_urgency (low|med|high), save as evals/labels.csv, then run:\n"

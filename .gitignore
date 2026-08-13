@@ -19,9 +19,13 @@ __pycache__/
 # Rendered briefs summarise private correspondence.
 /briefs/
 
-# Hand-labelled eval data references real messages by subject and excerpt.
-evals/labels.csv
-evals/labels_template.csv
+# Eval CSVs quote real messages — subjects, body excerpts, sender addresses.
+# Matched by extension, not by filename: the previous version named
+# labels.csv and labels_template.csv individually, so labels_v2_template.csv
+# was about to be committed. Enumerating files you must not commit is the same
+# class of mistake as an unanchored pattern — it fails silently and looks fine.
+# Markdown in evals/ (TAXONOMY.md, RESULTS.md) is tracked on purpose.
+/evals/*.csv
 
 # Python / tooling
 *.py[cod]

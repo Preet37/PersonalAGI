@@ -8,7 +8,6 @@ ever reads context back out of the database to decide what a file should say.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +23,8 @@ from personalagi.context.people import (
     slug_for,
 )
 from personalagi.db import get_engine, init_db
+from personalagi.identity import SHARED_ADDRESS_NAME_THRESHOLD, looks_automated
+from personalagi.identity import shared_addresses as _shared_addresses
 from personalagi.models import Classification, Message
 from personalagi.search import fts
 
@@ -34,31 +35,18 @@ log = logging.getLogger(__name__)
 # it is landfill. Override with include_categories=("*",).
 DEFAULT_INCLUDE = ("needs_response", "fyi", "unclassified")
 
-# Robot markers anywhere in the local part, delimiter-bounded. The prefix-only
-# version of this missed `jobalerts-noreply@linkedin.com` — 377 messages in the
-# real corpus — because the marker was not at the start.
-_AUTOMATED_RE = re.compile(
-    r"(?:^|[.\-+_])"
-    r"("
-    # machine senders
-    r"no-?reply|do-?not-?reply|notifications?|alerts?|mailer|bounce|postmaster|"
-    r"automated|digest|newsletter|unsubscribe|noreply|"
-    # role accounts: a shared mailbox is a company, not a person, and a
-    # person file for one is landfill. Dropping these was a regression that
-    # gave support@luma.com a 338-entry "person" file.
-    r"support|billing|receipts?|invoices?|sales|admin|info|contact|hello|help|"
-    r"service|marketing|offers|deals|events|apply|careers|jobs|team|press|"
-    r"newsroom|editors?|premium|promotions?|invitations?|updates?|news"
-    r")"
-    r"(?:[.\-+_]|$)",
-    re.IGNORECASE,
-)
-
-# An address used by more than this many distinct display names is a shared
-# bulk sender, not a person. LinkedIn sends every connection request from
-# invitations@linkedin.com with the requester's name in the From header, so
-# keying identity on the address would fuse hundreds of people into one file.
-SHARED_ADDRESS_NAME_THRESHOLD = 3
+# The identity heuristics themselves live in personalagi.identity, which knows
+# nothing about Gmail — Stage 8 needs them to serve iMessage handles and
+# calendar organisers too. Re-exported here so callers and tests that predate
+# the move keep working.
+__all__ = [
+    "SHARED_ADDRESS_NAME_THRESHOLD",
+    "BuildResult",
+    "build_people",
+    "entry_text_for",
+    "looks_automated",
+    "shared_addresses",
+]
 
 
 @dataclass
@@ -83,36 +71,12 @@ class BuildResult:
         )
 
 
-def looks_automated(email: str) -> bool:
-    """Heuristic, and deliberately conservative.
-
-    Matches a robot marker anywhere in the local part, delimiter-bounded.
-    Bounding is what keeps it conservative: `alerts@` and `job-alerts@` match,
-    but `alerta@` and `dana@` do not. False negatives cost one junk file;
-    false positives lose a real person, so the bound matters more than reach.
-    """
-    local = (email or "").split("@", 1)[0]
-    return bool(_AUTOMATED_RE.search(local))
-
-
 def shared_addresses(messages, threshold: int = SHARED_ADDRESS_NAME_THRESHOLD) -> set[str]:
-    """Addresses used by many different display names.
-
-    Data-driven rather than a hardcoded blocklist of providers: any bulk
-    sender that stamps a human's name onto a shared envelope address gets
-    caught, not just the ones I happened to think of.
-    """
-    names_by_address: dict[str, set[str]] = {}
-    for message in messages:
-        address = (message.sender_email or "").lower()
-        name = (message.sender_name or "").strip().lower()
-        if address and name:
-            names_by_address.setdefault(address, set()).add(name)
-    return {
-        address
-        for address, names in names_by_address.items()
-        if len(names) > threshold
-    }
+    """Message-shaped adapter over identity.shared_addresses."""
+    return _shared_addresses(
+        ((m.sender_email or "", m.sender_name or "") for m in messages),
+        threshold=threshold,
+    )
 
 
 def entry_text_for(message: Message, classification: Classification | None) -> str:
