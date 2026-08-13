@@ -79,6 +79,24 @@ class Settings(BaseSettings):
     # reactive answer they asked for.
     sweep_min_confidence: float = 0.5
 
+    # --- Feedback loop ---
+    # Days before an unanswered SURFACED proposal ages to `ignored`. Silence is
+    # ambiguous -- he may not have looked -- so it is inferred, never asserted,
+    # and weighted low when used as an example.
+    feedback_ignore_days: int = 5
+    # Recency half-life for retrieved examples. Gentle: overfitting to last
+    # week is a real failure mode, and a correction from March is still a
+    # correction.
+    feedback_half_life_days: int = 90
+    # An old lesson is worth less than a new one, never nothing.
+    feedback_recency_floor: float = 0.25
+
+    # --- Investigation loop ---
+    # Both enforced in code, not requested in a prompt. An agentic loop with no
+    # ceiling is an unbounded bill.
+    investigate_max_iterations: int = 6
+    investigate_call_budget: int = 12
+
     # --- Relevance (stage B) ---
     # Only human-sender messages reach the expensive pass; on this corpus that
     # is ~500 of 3,998, which is what makes a larger model affordable here.

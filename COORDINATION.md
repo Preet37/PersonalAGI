@@ -45,3 +45,8 @@ Read this before starting work; append your track's section when you finish.
   `prep.py` (meeting prep). **Touched `adapters/base.py`, which is outside this
   track**, to fix shared-envelope identity — reported here per the rules.
   Rationale in the commit; it was blocking `prep` on the Monday meeting.
+
+- **Track feedback** — added `feedback.py` (ledger + outcome-conditioned
+  examples) and `investigate.py` (bounded agentic retrieval). Touched
+  `db.py` to add `_assert_no_nulls`, and `goal_evidence.py` for IDF —
+  both were listed as FIX FIRST prerequisites.

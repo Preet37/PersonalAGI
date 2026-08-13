@@ -198,6 +198,33 @@ def _build_parser() -> argparse.ArgumentParser:
     meets = sub.add_parser("meetings", help="calendar events inside the next N hours")
     meets.add_argument("--hours", type=int, default=24)
 
+    fb = sub.add_parser("feedback", help="record what you did with a proposal")
+    fb.add_argument("proposal_id", help="id or unique prefix")
+    fb.add_argument(
+        "outcome",
+        choices=["accepted", "edited", "dismissed", "ignored", "reversed"],
+    )
+    fb.add_argument("--note", default="", help="for `edited`: what you actually sent")
+
+    fbh = sub.add_parser("proposals", help="the proposal ledger and its outcomes")
+    fbh.add_argument("--limit", type=int, default=20)
+    fbh.add_argument("--outcome", default=None)
+    fbh.add_argument(
+        "--age-out", action="store_true",
+        help="mark unanswered surfaced proposals as ignored",
+    )
+    fbh.add_argument(
+        "--explore", action="store_true",
+        help="show suppressed proposals deliberately, so blind spots stay visible",
+    )
+
+    inv = sub.add_parser(
+        "investigate", help="follow a question outward: search, read, repeat"
+    )
+    inv.add_argument("question")
+    inv.add_argument("--max-iterations", type=int, default=None)
+    inv.add_argument("--budget", type=int, default=None)
+
     owed = sub.add_parser("owed", help="open commitments, grouped by person")
     owed.add_argument(
         "--to-me",
@@ -647,6 +674,63 @@ def _cmd_prep(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_feedback(args: argparse.Namespace) -> int:
+    from personalagi.feedback import FeedbackError, record_outcome
+
+    try:
+        row = record_outcome(
+            args.proposal_id, args.outcome, get_settings(), note=args.note
+        )
+    except FeedbackError as exc:
+        print(f"error: {exc}")
+        return 2
+    print(f"{row.proposal_id[:8]} -> {row.outcome}")
+    return 0
+
+
+def _cmd_proposals(args: argparse.Namespace) -> int:
+    from personalagi.feedback import (
+        exploration_sample,
+        history,
+        mark_ignored,
+        render_history,
+        stats,
+    )
+
+    settings = get_settings()
+    if args.age_out:
+        print(f"aged {mark_ignored(settings)} unanswered proposal(s) to ignored")
+
+    if args.explore:
+        rows = exploration_sample(settings)
+        if not rows:
+            print("Nothing suppressed. No blind spots to show.")
+            return 0
+        print("SUPPRESSED — shown on purpose, so the blind spots stay visible:")
+        print()
+        print(render_history(rows))
+        return 0
+
+    print(stats(settings).summary())
+    print()
+    print(render_history(history(settings, limit=args.limit, outcome=args.outcome)))
+    return 0
+
+
+def _cmd_investigate(args: argparse.Namespace) -> int:
+    from personalagi.investigate import investigate
+    from personalagi.records import CallBudget
+
+    result = investigate(
+        args.question,
+        get_settings(),
+        max_iterations=args.max_iterations,
+        budget=CallBudget(limit=args.budget) if args.budget else None,
+    )
+    print(result.render())
+    return 0
+
+
 def _cmd_owed(args: argparse.Namespace) -> int:
     from personalagi.commitments import list_owed, refresh_stale, render_owed
 
@@ -927,6 +1011,9 @@ def main(argv: list[str] | None = None) -> int:
         "activate": _cmd_activate,
         "build-edges": _cmd_build_edges,
         "meetings": _cmd_meetings,
+        "feedback": _cmd_feedback,
+        "proposals": _cmd_proposals,
+        "investigate": _cmd_investigate,
         "owed": _cmd_owed,
         "done": _cmd_done,
         "labels-template": _cmd_labels_template,
