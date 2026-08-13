@@ -1,0 +1,24 @@
+credentials/
+tokens/
+.env
+*.db
+__pycache__/
+.venv/
+
+# The vault: real names, addresses, and private correspondence. Never committed.
+# See context.example/ for the structure.
+context/
+
+# Derived artifacts — rebuildable from context/ by reindexing.
+data/
+
+# Python / tooling
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# macOS
+.DS_Store

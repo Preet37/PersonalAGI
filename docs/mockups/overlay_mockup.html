@@ -1,0 +1,74 @@
+<h2 class="sr-only">Mockup of the PersonalAGI desktop overlay: a compact always-on bar with a proposal card showing meeting todos and permission tiers.</h2>
+
+<div style="background: var(--surface-1); border-radius: 12px; padding: 1.5rem; min-height: 520px;">
+
+  <div style="max-width: 520px; margin: 0 auto;">
+
+    <div style="display: flex; align-items: center; gap: 10px; background: var(--surface-2); border: 0.5px solid var(--border-strong); border-radius: 999px; padding: 8px 14px; margin-bottom: 14px;">
+      <span style="width: 8px; height: 8px; border-radius: 50%; background: var(--fill-success); flex-shrink: 0;"></span>
+      <span style="font-size: 13px; color: var(--text-secondary);">Listening &middot; Cisco sync</span>
+      <span style="font-size: 13px; color: var(--text-muted); margin-left: auto; font-variant-numeric: tabular-nums;">24:31</span>
+      <i class="ti ti-microphone" style="font-size: 17px; color: var(--text-secondary);" aria-hidden="true"></i>
+      <i class="ti ti-device-desktop" style="font-size: 17px; color: var(--text-secondary);" aria-hidden="true"></i>
+      <i class="ti ti-player-pause" style="font-size: 17px; color: var(--text-secondary);" aria-hidden="true"></i>
+      <i class="ti ti-x" style="font-size: 17px; color: var(--text-muted);" aria-hidden="true"></i>
+    </div>
+
+    <div style="background: var(--surface-2); border: 0.5px solid var(--border); border-radius: 12px; overflow: hidden;">
+
+      <div style="padding: 14px 16px; border-bottom: 0.5px solid var(--border); display: flex; align-items: center; gap: 8px;">
+        <i class="ti ti-sparkles" style="font-size: 17px; color: var(--text-accent);" aria-hidden="true"></i>
+        <span style="font-size: 14px; font-weight: 500;">Meeting ended &middot; 3 things surfaced</span>
+        <span style="margin-left: auto; font-size: 12px; color: var(--text-muted);">2m ago</span>
+      </div>
+
+      <div style="padding: 14px 16px; border-bottom: 0.5px solid var(--border);">
+        <p style="margin: 0 0 10px; font-size: 12px; color: var(--text-muted);">Extracted from transcript</p>
+
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px;">
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: var(--radius); background: var(--bg-success); color: var(--text-success); flex-shrink: 0; margin-top: 1px;">auto</span>
+          <div style="min-width: 0;">
+            <p style="margin: 0; font-size: 14px;">Log decision to <span style="font-family: var(--font-mono); font-size: 13px;">context/topics/rl-gym.md</span></p>
+            <p style="margin: 2px 0 0; font-size: 12px; color: var(--text-secondary);">Reversible, stays local &middot; done</p>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px;">
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: var(--radius); background: var(--bg-warning); color: var(--text-warning); flex-shrink: 0; margin-top: 1px;">approve</span>
+          <div style="min-width: 0;">
+            <p style="margin: 0; font-size: 14px;">Send Arjun the architecture doc</p>
+            <p style="margin: 2px 0 0; font-size: 12px; color: var(--text-secondary);">Draft ready &middot; leaves your machine</p>
+          </div>
+        </div>
+
+        <div style="display: flex; align-items: flex-start; gap: 10px;">
+          <span style="font-size: 11px; padding: 2px 8px; border-radius: var(--radius); background: var(--bg-warning); color: var(--text-warning); flex-shrink: 0; margin-top: 1px;">approve</span>
+          <div style="min-width: 0;">
+            <p style="margin: 0; font-size: 14px;">Block 2 hours Thursday for the eval run</p>
+            <p style="margin: 2px 0 0; font-size: 12px; color: var(--text-secondary);">Calendar write</p>
+          </div>
+        </div>
+      </div>
+
+      <div style="padding: 12px 16px; background: var(--surface-1);">
+        <p style="margin: 0 0 8px; font-size: 12px; color: var(--text-muted);">Why it thinks so</p>
+        <p style="margin: 0; font-size: 13px; color: var(--text-secondary); line-height: 1.6;">Arjun asked for the doc at 18:04 in the transcript. Your last three replies to him landed within 4 hours.</p>
+      </div>
+
+      <div style="padding: 12px 16px; border-top: 0.5px solid var(--border); display: flex; gap: 8px;">
+        <button style="flex: 1;" onclick="sendPrompt('Walk me through how the proposal engine decides which tier an action belongs to')">Approve all</button>
+        <button style="flex: 1;">Review each</button>
+        <button style="flex: 0 0 auto;" aria-label="Dismiss"><i class="ti ti-x" style="font-size: 15px;" aria-hidden="true"></i></button>
+      </div>
+
+    </div>
+
+    <div style="display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap;">
+      <span style="font-size: 12px; color: var(--text-muted); padding: 4px 10px; border: 0.5px solid var(--border); border-radius: 999px;"><i class="ti ti-mail" style="font-size: 13px; vertical-align: -1px; margin-right: 4px;" aria-hidden="true"></i>3 inboxes</span>
+      <span style="font-size: 12px; color: var(--text-muted); padding: 4px 10px; border: 0.5px solid var(--border); border-radius: 999px;"><i class="ti ti-message" style="font-size: 13px; vertical-align: -1px; margin-right: 4px;" aria-hidden="true"></i>iMessage</span>
+      <span style="font-size: 12px; color: var(--text-muted); padding: 4px 10px; border: 0.5px solid var(--border); border-radius: 999px;"><i class="ti ti-calendar" style="font-size: 13px; vertical-align: -1px; margin-right: 4px;" aria-hidden="true"></i>Calendar</span>
+      <span style="font-size: 12px; color: var(--text-muted); padding: 4px 10px; border: 0.5px solid var(--border); border-radius: 999px;"><i class="ti ti-folder" style="font-size: 13px; vertical-align: -1px; margin-right: 4px;" aria-hidden="true"></i>Files</span>
+    </div>
+
+  </div>
+</div>
