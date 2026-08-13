@@ -32,7 +32,8 @@ from sqlmodel import Session
 from personalagi.config import Settings, get_settings
 from personalagi.db import get_engine, init_db
 from personalagi.models import Event, Goal, GoalStep, Participant, StepEvidence
-from personalagi.records import citable_events
+from personalagi.records import CallBudget, citable_events
+from personalagi.semantic import judge_evidence
 
 log = logging.getLogger(__name__)
 
@@ -47,14 +48,21 @@ STOPWORDS = frozenset(
 )
 
 MIN_TERM_LENGTH = 3
-# Below this, the match is one incidental word and not evidence of anything.
-# Raised from 0.34 after the real-data run: a third of a three-word step is one
-# word, and one shared word between a marketing email and a task is a
-# coincidence, not support.
-MIN_SCORE = 0.6
+# The keyword pass is now RECALL ONLY. It nominates candidates; the model
+# decides. So this threshold is deliberately LOOSE -- its job is to avoid
+# missing things, not to be right. Precision is bought one layer up, in
+# semantic.judge_evidence, where meaning actually lives.
+#
+# It was 0.6 when this score was the verdict. That number was doing work it
+# could not do: at 0.6 a credit-card application still "supported" a Carnegie
+# Mellon application, because both contain "submit" and "application".
+MIN_SCORE = 0.34
 # A step must contribute at least this many content words before any match is
 # believable. "Follow up" cannot be evidenced by search.
 MIN_TERMS_FOR_SEARCH = 2
+# Candidates handed to the judge per step. Wider than the final link limit
+# because the judge is expected to reject most of them.
+JUDGE_CANDIDATES = 6
 MAX_CANDIDATES = 40
 
 _WORD_RE = re.compile(r"[\w']+", re.UNICODE)
@@ -73,11 +81,20 @@ class LinkResult:
     links_added: int = 0
     steps_with_evidence: int = 0
     steps_without: int = 0
+    judge_calls: int = 0
+    judge_rejected: int = 0
 
     def summary(self) -> str:
+        judged = (
+            f"  judge: {self.judge_calls} call(s), rejected {self.judge_rejected} "
+            f"keyword candidate(s)"
+            if self.judge_calls or self.judge_rejected
+            else ""
+        )
         return (
             f"examined {self.steps_examined} step(s), added {self.links_added} link(s); "
             f"{self.steps_with_evidence} supported, {self.steps_without} with nothing"
+            + (f"\n{judged}" if judged else "")
         )
 
 
@@ -232,8 +249,15 @@ def link_evidence(
     goal_slug: str | None = None,
     limit_per_step: int = 3,
     dry_run: bool = False,
+    judge: bool = True,
+    budget: CallBudget | None = None,
 ) -> LinkResult:
-    """Search for supporting events for every open step and record the links."""
+    """Find candidates by keyword, then have the model decide which support.
+
+    `judge=False` falls back to the keyword score alone. That path exists for
+    offline use and tests, and it is NOT the default, because a keyword score
+    cannot tell a Carnegie Mellon application from a credit-card one.
+    """
     settings = settings or get_settings()
     init_db(settings)
     result = LinkResult()
@@ -274,6 +298,28 @@ def link_evidence(
         if dry_run or not fresh:
             continue
 
+        if judge:
+            # The keyword pass proposed; the model disposes. Fails CLOSED --
+            # an unjudged candidate is never linked, because a false link
+            # marks the step handled and the alert goes silent.
+            verdicts = judge_evidence(
+                step.description,
+                [m.event for m in fresh],
+                settings,
+                context=f'This step belongs to the goal "{goal.title}".',
+                budget=budget,
+            )
+            result.judge_calls += verdicts.calls
+            result.judge_rejected += len(verdicts.verdicts) - len(verdicts.supported)
+            supported = {v.event_id: v for v in verdicts.supported}
+            fresh = [m for m in fresh if m.event.id in supported]
+            if not fresh:
+                # Candidates existed but none survived judgement. That is a
+                # real finding, not a failure -- the step still has no support.
+                result.steps_with_evidence -= 1
+                result.steps_without += 1
+                continue
+
         with Session(get_engine(settings)) as session:
             for match in fresh:
                 session.add(
@@ -283,7 +329,7 @@ def link_evidence(
                         # "search", never "manual": an automatically-found link
                         # is a candidate, not a confirmation, and the method is
                         # stored so a wrong one is diagnosable.
-                        method="search",
+                        method="judged" if judge else "search",
                         confidence=round(match.score, 3),
                         linked_at=now,
                     )

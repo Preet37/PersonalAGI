@@ -190,7 +190,7 @@ class TestGapDetection:
         create_goal("CMU", settings, steps=["Ask Pratik for a letter"])
         sync_goals(settings)
 
-        link_evidence(settings)
+        link_evidence(settings, judge=False)
 
         assert get_goal("cmu", settings).unevidenced_steps == []
 
@@ -208,7 +208,7 @@ class TestGapDetection:
             people={"pratik": "recommender"},
         )
         sync_goals(settings)
-        link_evidence(settings)
+        link_evidence(settings, judge=False)
 
         view = get_goal("get-into-cmu", settings)
         missing = [s.description for s in view.unevidenced_steps]
@@ -267,11 +267,9 @@ class TestEvidenceSearch:
         without = find_evidence(step, settings)
         with_person = find_evidence(step, settings, person_slugs={"pratik"})
 
-        assert without == []
-        assert len(with_person) == 1
-        # Exact value depends on IDF weights over the corpus; what matters is
-        # that the bonus carried a genuine partial match over the bar.
-        assert with_person[0].score >= 0.6
+        # The keyword layer is recall-only, so both may return the event; what
+        # the bonus must do is rank a goal-person's message higher.
+        assert with_person[0].score > (without[0].score if without else 0.0)
 
     def test_the_person_bonus_cannot_rescue_a_zero_match(self, settings):
         """Without this floor every message a goal's person ever sent scores
@@ -308,7 +306,7 @@ class TestEvidenceSearch:
         add_event(settings, "g1", "Sending the sponsorship prospectus")
         create_goal("X", settings, steps=["Send the sponsorship prospectus"])
         sync_goals(settings)
-        link_evidence(settings)
+        link_evidence(settings, judge=False)
 
         from personalagi.models import StepEvidence
 
@@ -317,7 +315,7 @@ class TestEvidenceSearch:
                 __import__("sqlalchemy").select(StepEvidence)
             ).scalars().first()
 
-        assert link.method == "search"
+        assert link.method == "search"  # judge=False path
         assert 0.0 < link.confidence <= 1.0
 
     def test_a_dry_run_writes_nothing(self, settings):
@@ -325,7 +323,7 @@ class TestEvidenceSearch:
         create_goal("X", settings, steps=["Send the sponsorship prospectus"])
         sync_goals(settings)
 
-        link_evidence(settings, dry_run=True)
+        link_evidence(settings, judge=False, dry_run=True)
 
         assert len(get_goal("x", settings).unevidenced_steps) == 1
 
@@ -334,8 +332,8 @@ class TestEvidenceSearch:
         create_goal("X", settings, steps=["Send the sponsorship prospectus"])
         sync_goals(settings)
 
-        first = link_evidence(settings).links_added
-        second = link_evidence(settings).links_added
+        first = link_evidence(settings, judge=False).links_added
+        second = link_evidence(settings, judge=False).links_added
 
         assert first >= 1
         assert second == 0
@@ -346,7 +344,7 @@ class TestGoalActivity:
         add_event(settings, "g1", "Sending the sponsorship prospectus", when=NOW)
         create_goal("X", settings, steps=["Send the sponsorship prospectus"])
         sync_goals(settings)
-        link_evidence(settings)
+        link_evidence(settings, judge=False)
 
         assert get_goal("x", settings).goal.last_activity == NOW
 
@@ -471,23 +469,28 @@ class TestIdfWeighting:
     because "submit" and "application" are everywhere and "cmu" was absent.
     """
 
-    def test_a_common_word_match_no_longer_clears_the_bar(self, settings):
-        # A corpus where "application" and "submit" are everywhere.
-        for i in range(12):
-            add_event(settings, f"noise{i}", "Submit your application today!")
-
-        matches = find_evidence("Submit the CMU application", settings)
-
-        assert all("cmu" in m.matched for m in matches)
-
-    def test_the_distinctive_word_is_what_matches(self, settings):
+    def test_the_distinctive_word_ranks_the_right_one_first(self, settings):
+        """The keyword pass is RECALL-only now, so it may return noise. What
+        it must do is rank the genuinely distinctive match above it -- the
+        judge only sees the top few candidates."""
         for i in range(12):
             add_event(settings, f"noise{i}", "Submit your application today")
         add_event(settings, "real", "Submitting my CMU application now")
 
         matches = find_evidence("Submit the CMU application", settings)
 
-        assert [m.event.source_id for m in matches] == ["real"]
+        assert matches[0].event.source_id == "real"
+
+    def test_idf_still_weights_the_rare_word_highest(self, settings):
+        for i in range(12):
+            add_event(settings, f"noise{i}", "Submit your application today")
+        add_event(settings, "real", "Submitting my CMU application now")
+
+        matches = find_evidence("Submit the CMU application", settings)
+        best = matches[0]
+
+        assert "cmu" in best.matched
+        assert best.score > (matches[1].score if len(matches) > 1 else 0)
 
     def test_weights_stay_positive_on_a_tiny_corpus(self, settings):
         """Plain log(total/seen) is 0 when a term is in every document, which

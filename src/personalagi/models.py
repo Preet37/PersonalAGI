@@ -514,6 +514,59 @@ class ProposalRecord(SQLModel, table=True):
     created_at: datetime = Field(index=True)
 
 
+class Judgement(SQLModel, table=True):
+    """A cached semantic verdict.
+
+    A (task, event) pair has a stable answer — neither the message nor the step
+    text changes on its own — so re-paying for the judgement on every sweep
+    would make the nightly run cost real money for an answer already known.
+
+    Keyed on a hash of the normalised question, so editing the step text
+    correctly invalidates the cache instead of silently reusing a verdict about
+    a different question.
+    """
+
+    __tablename__ = "judgement"
+    __table_args__ = (
+        UniqueConstraint("question_hash", name="uq_judgement_question"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    question_hash: str = Field(index=True)
+    # evidence | contradiction | relevance
+    kind: str = Field(default="evidence", index=True)
+    # The task or claim being judged, kept for debugging a bad verdict.
+    subject: str = ""
+    event_id: int | None = Field(default=None, foreign_key="event.id", index=True)
+
+    verdict: bool = Field(default=False, index=True)
+    why: str = ""
+
+    model: str = ""
+    prompt_version: str = ""
+    decided_at: datetime
+
+
+class ExtractedFact(SQLModel, table=True):
+    """Link from a Fact back to the events that produced it.
+
+    Separate from Fact.source_event_id because one statement about the future
+    can be corroborated by several messages, and a fact backed by three
+    independent mentions is worth more than one backed by a single aside.
+    """
+
+    __tablename__ = "extracted_fact"
+    __table_args__ = (
+        UniqueConstraint("fact_id", "event_id", name="uq_extracted_fact"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    fact_id: int = Field(foreign_key="fact.id", index=True)
+    event_id: int = Field(foreign_key="event.id", index=True)
+    quote: str = ""
+    linked_at: datetime
+
+
 class IngestState(SQLModel, table=True):
     """Per-account sync cursors.
 
