@@ -63,6 +63,22 @@ class Settings(BaseSettings):
     owner_emails: str = ""
     owner_name: str = ""
 
+    # --- Proactive sweep (trigger B) ---
+    # Every one of these bounds a plain database query. None of them cost a
+    # model call; a model is only asked to WRITE a proposal that already fired.
+    sweep_deadline_days: int = 30
+    sweep_goal_stale_days: int = 14
+    sweep_contact_days: int = 90
+    sweep_meeting_hours: int = 24
+    # Hard ceiling on model calls per sweep, enforced in code. A system that
+    # thinks on its own is a system that spends on its own; this is the wall it
+    # hits instead of a bill.
+    sweep_call_budget: int = 20
+    # Findings below this are STORED but not surfaced. Three bad interruptions
+    # and the owner stops reading the system, so the bar is higher than for a
+    # reactive answer they asked for.
+    sweep_min_confidence: float = 0.5
+
     # --- Relevance (stage B) ---
     # Only human-sender messages reach the expensive pass; on this corpus that
     # is ~500 of 3,998, which is what makes a larger model affordable here.
