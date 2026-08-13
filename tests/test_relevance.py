@@ -277,3 +277,62 @@ class TestSelfCitation:
         assert with_self.total_log_lines == 1
         assert without_self.total_log_lines == 0
         assert without_self.log_lines == []
+
+
+class TestContextIsAboutTheCounterparty:
+    """On the owner's own outgoing messages, the sender IS the owner.
+
+    Retrieving context for the sender there retrieves context about the owner,
+    and the model justified maximum relevance with "SENDER block shows sender
+    is Preet Karia, the owner himself" — circular reasoning that inflated every
+    sent message to a 3. The person whose history explains an outgoing message
+    is the person it was sent TO.
+    """
+
+    def test_an_owner_sent_message_does_not_retrieve_the_owner(self, tmp_path):
+        from personalagi.config import Settings
+        from personalagi.db import init_db
+        from personalagi.llm.relevance import NO_CONTEXT, render_context
+        from tests.factories import make_view
+
+        settings = Settings(
+            database_url=f"sqlite:///{tmp_path / 'r.db'}", context_dir=tmp_path / "ctx"
+        )
+        init_db(settings)
+        view = make_view(
+            email="preet@example.com",
+            to=[("", "preet@example.com")],  # note to self: no counterparty
+            owner_addresses={"preet@example.com"},
+        )
+
+        text, slug, tokens = render_context(view, settings)
+
+        assert text == NO_CONTEXT
+        assert slug == ""
+
+    def test_it_looks_up_the_recipient_on_sent_mail(self, tmp_path):
+        from personalagi.config import Settings
+        from personalagi.context.people import LogEntry, PersonFile, save_person
+        from personalagi.db import init_db
+        from personalagi.llm.relevance import render_context
+        from tests.factories import make_view
+
+        context_dir = tmp_path / "ctx"
+        person = PersonFile(slug="karan-g", name="Karan G", profile="Works at Deepgram.")
+        person.log.append(LogEntry(datetime(2026, 8, 1).date(), "talked sponsorship", "x1"))
+        save_person(context_dir, person)
+
+        settings = Settings(
+            database_url=f"sqlite:///{tmp_path / 'r.db'}", context_dir=context_dir
+        )
+        init_db(settings)
+        view = make_view(
+            email="preet@example.com",
+            to=[("Karan G", "karan@example.com")],
+            owner_addresses={"preet@example.com"},
+        )
+
+        text, slug, _ = render_context(view, settings)
+
+        assert slug == "karan-g"
+        assert "Deepgram" in text

@@ -139,13 +139,25 @@ def direction_for(promiser: str, sent_by_owner: bool) -> str:
 
 
 def render_context(view: EventView, settings: Settings) -> tuple[str, str, int]:
-    """Retrieve the sender's stored context. Returns (text, slug, tokens).
+    """Retrieve the COUNTERPARTY's stored context. Returns (text, slug, tokens).
 
     The query is the event title, so FTS returns the log lines related to
     *this* thread rather than the person's most recent activity in general.
+
+    "Counterparty", not "sender", and the difference is load-bearing on the
+    owner's own outgoing messages. Retrieving context for the sender there
+    retrieves context about the OWNER, and the model duly justified maximum
+    relevance with "SENDER block shows sender is Preet Karia, the owner
+    himself" — circular, and it inflated every sent message to a 3.
+
+    The person whose history explains an outgoing message is the person it was
+    sent TO.
     """
-    slug = view.person_slug or view.sender_address
-    if not slug:
+    other = view.counterparty
+    slug = (other.person_slug if other else "") or (
+        other.address if other else ""
+    )
+    if not slug or (other is not None and other.is_owner):
         return NO_CONTEXT, "", 0
     try:
         found = get_context(
