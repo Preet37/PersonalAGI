@@ -315,3 +315,111 @@ sharper, not softer. Name it before someone else does.
    artifact and it is better than an F1.
 5. Rotate the Groq key.
 6. `python -m personalagi auth calendar` when you have a browser.
+
+---
+
+# Night three — the SPEC build
+
+Phase 0 plus three of the four tracks from `docs/SPEC.md`. Repo is now on
+GitHub (private), three merged PRs, **538 tests** (was 224 two nights ago).
+
+## What is new and runnable
+
+```bash
+python -m personalagi goal list        # goals, soonest deadline first
+python -m personalagi goal gaps        # steps with NOTHING behind them
+python -m personalagi sweep --dry-run  # the proactive check. costs nothing.
+python -m personalagi prep <person>    # meeting brief, every claim cited
+python -m personalagi activate <person># what does this connect to
+```
+
+| | |
+|---|---|
+| Events | 4,346 |
+| Graph edges | **10,594** |
+| People reachable | **464** (was 173) |
+| Goals / steps | 2 / 5 |
+| Commitments | 26 |
+| Tests | **538** |
+
+## The sweep works, and it is free
+
+First run on real data, `model_calls=0`:
+
+```
+[surface ] 0.72 deadline_gap: a required step, 17 days out, nothing supports it
+[surface ] 0.90 stale_commitment: a promise 62d old, nothing since
+[surface ] 0.85 stale_commitment: 35d
+[surface ] 0.78 stale_commitment: 28d
+[suppress] 0.45 stale_goal: no activity since creation
+```
+
+**The deadline gap is the letter-of-rec case.** Nothing arrived, nothing could
+have triggered it, and it fired anyway — because absence is now a query rather
+than an absence of queries. The same person surfaces twice, independently, from
+two different checks.
+
+Suppressed findings are stored, not dropped. `--show-suppressed` exists because
+once a system goes quiet its blind spots become invisible to the person
+relying on it.
+
+## Three bugs the real data caught
+
+**1. `"letter"` matches inside `"newsletter"`.** The first evidence scorer used
+substring matching and produced six links. All six false — `"Ask Pratik for a
+letter of recommendation"` was "supported" by `"Welcome to Balenciaga"`. This
+is the dangerous direction: a false link marks a step **handled** when nothing
+happened. Word boundaries, threshold 0.34 → 0.6. Six false links → two.
+
+**2. A finding that always asked for `NUDGE` could never interrupt** — even the
+day before a deadline — because `clamp_attention` only ever caps. Deadline
+findings now request exactly what their deadline permits.
+
+**3. The shared-envelope rule made 215 people invisible.** `prep` on the Monday
+meeting returned "no person matching". The row was
+`('invitations@linkedin.com', 'Arjun Sambamoorthy', '', 1, ...)`. Refusing the
+ADDRESS is right — attaching it would fuse 215 LinkedIn requesters into one
+file. But refusing the *person* too is a different decision, and conflating
+them hid everyone who only ever reached you through a bulk envelope. On a
+shared envelope the display name **is** the identity. Reachable people 173 → 464.
+
+## The migration that failed silently
+
+Adding `provenance` left every existing row NULL, so `citable_events()` matched
+**0 of 4,346**. Nothing raised. Every claim would simply have lost its evidence,
+quietly, and the symptom weeks later would have been "it got vaguer".
+
+Caught by printing the count after migrating — not by a test. Same lesson as
+the gitignore bug: verify the artefact, not the intent.
+
+## What is NOT built
+
+- **Track feedback (26/27/28).** No proposal-outcome recording, no
+  outcome-conditioned prompting, no investigation loop. `ProposalRecord`
+  carries the `outcome` field, so the schema is ready and the logic is not.
+- **Track sources.** Chat exports, WhatsApp, LinkedIn, file reader.
+- Stages 29-35: calendar auth, contradiction detection, real send handler,
+  desktop app, transcripts, screen context.
+- Trigger A was **not** rewritten to feed activation into the relevance call.
+  Activation exists and is tested; relevance does not consume it yet.
+
+## Three things most likely wrong
+
+1. **The evidence linker still has a semantic ceiling.** `"Submit the CMU
+   application"` matches a *credit-card* application at 0.67. Lexical match,
+   semantic miss. Links carry `method` and `confidence`, so check them before
+   trusting a closed gap.
+2. **Edge weights are invented, not measured.** `DEFAULT_EDGE_WEIGHT` was
+   chosen so an obligation carries further than a coincidence, then left alone.
+   Activation output has never been evaluated against what you would consider
+   relevant.
+3. **Sweep confidence numbers are arithmetic, not calibration.** `0.72` means
+   "17 days out on a 30-day horizon", not "72% likely to matter to you".
+
+## Before Monday
+
+1. Read `context/owner.md` and correct it — still the highest-risk file.
+2. **Ask Pratik.** The system now surfaces it; that does not send it.
+3. `goal add` your real goals. Two exist, both written by me as examples.
+4. Spot-check `prep` on three people you know well.
+5. Rotate the Groq key.
