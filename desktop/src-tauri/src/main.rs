@@ -14,6 +14,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -32,6 +33,60 @@ struct CliResult {
     output: String,
 }
 
+/// Find the interpreter that has personalagi installed.
+///
+/// A Finder-launched .app inherits almost no PATH -- not the shell's, and
+/// certainly not an activated virtualenv. Calling bare `python` works when the
+/// app is started from a terminal and fails the moment it is double-clicked,
+/// which is the way it will actually be used.
+///
+/// PERSONALAGI_PYTHON wins if set. Otherwise the project's own .venv, which is
+/// where the package actually lives. `python3` on PATH is the last resort, and
+/// it is genuinely a resort: it will usually be the system Python with none of
+/// the dependencies.
+fn interpreter() -> PathBuf {
+    if let Ok(explicit) = std::env::var("PERSONALAGI_PYTHON") {
+        let path = PathBuf::from(explicit);
+        if path.exists() {
+            return path;
+        }
+    }
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(root) = std::env::var("PERSONALAGI_ROOT") {
+        candidates.push(PathBuf::from(root).join(".venv/bin/python"));
+    }
+    // The repo checkout, relative to the compiled binary at
+    // desktop/src-tauri/target/{debug,release}/.
+    if let Ok(exe) = std::env::current_exe() {
+        let mut walk = exe.as_path();
+        for _ in 0..6 {
+            if let Some(parent) = walk.parent() {
+                candidates.push(parent.join(".venv/bin/python"));
+                walk = parent;
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join("PersonalAGI/.venv/bin/python"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|p| p.exists())
+        .unwrap_or_else(|| PathBuf::from("python3"))
+}
+
+/// The directory to run the CLI from, so it reads the right .env and database.
+fn working_dir() -> Option<PathBuf> {
+    interpreter()
+        .parent()          // .venv/bin
+        .and_then(|p| p.parent())  // .venv
+        .and_then(|p| p.parent())  // project root
+        .map(PathBuf::from)
+        .filter(|p| p.join("src/personalagi").exists())
+}
+
 /// Run a CLI subcommand and hand back its text.
 ///
 /// The argument list is fixed per command below and never assembled from
@@ -46,7 +101,16 @@ fn run(capture: &Capture, args: &[&str]) -> CliResult {
         };
     }
 
-    match Command::new("python").arg("-m").arg("personalagi").args(args).output() {
+    let python = interpreter();
+    let mut command = Command::new(&python);
+    command.arg("-m").arg("personalagi").args(args);
+    if let Some(dir) = working_dir() {
+        // Without this the CLI runs from wherever Finder launched the app and
+        // silently uses a different (empty) database.
+        command.current_dir(dir);
+    }
+
+    match command.output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -62,7 +126,9 @@ fn run(capture: &Capture, args: &[&str]) -> CliResult {
             ok: false,
             output: format!(
                 "could not run the CLI: {err}\n\
-                 The desktop shell requires `python -m personalagi` on PATH."
+                 Tried: {}\n\
+                 Set PERSONALAGI_PYTHON to your venv's python if this is wrong.",
+                python.display()
             ),
         },
     }
