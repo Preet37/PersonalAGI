@@ -501,3 +501,88 @@ Facts yet), contradiction detection (31).
 3. **Investigation depth is untested against a real multi-hop question.** The
    DJ chain works in fixtures; on your corpus it stopped at one hop because the
    participants were unnamed phone handles.
+
+---
+
+# Final build — everything remaining
+
+**656 tests.** Stages 20, 24, 30, 31, 32, 33 plus the semantic layer. Nothing
+is stubbed out and waiting except the one thing that must be: the live send.
+
+## The hardcoding is gone
+
+You were right. The system had stopword lists, regex ask-markers and IDF
+keyword scoring standing in for understanding. They failed exactly where you
+would expect — `letter` inside `newsletter`, a credit-card application
+"supporting" a Carnegie Mellon one.
+
+The keyword pass now only **nominates**; the model **decides**. `MIN_SCORE`
+went 0.6 → 0.34 on purpose: it no longer has to be right, only to avoid
+missing things.
+
+On real data the judge rejected all four keyword candidates, **including the
+one I told you was a true positive**:
+
+```
+rejects  Submit the CMU application   "only confirms start, not submission"
+rejects  Send Daniel the prospectus   "mentions Logitech but no prospectus sent"
+```
+
+That first one is a correction to me. The step says SUBMIT; the email confirms
+STARTING. The gap stays open, correctly.
+
+## What now runs
+
+| | |
+|---|---|
+| Events | 4,348 across **gmail, imessage, claude** |
+| Graph edges | 10,594 |
+| Facts (dated triggers) | 4 |
+| Cached judgements | 4 |
+| Commitments | 26 |
+
+```bash
+personalagi sweep              # proactive, model_calls=0
+personalagi facts extract      # future dates become triggers
+personalagi contradictions     # statements that cannot both be true
+personalagi import <file>      # Claude/ChatGPT/Gemini/WhatsApp/LinkedIn
+personalagi investigate "..."  # search, read, repeat
+personalagi prep <person>      # every claim cited
+cd desktop && npm run tauri dev
+```
+
+Fact extraction on 25 real events found 3, all grounded, all dated — including
+the Llama decommission on **August 16**.
+
+## Provenance now covers assistant transcripts
+
+An export is the first file containing **both** kinds of record. Your turns are
+`external` and citable; the assistant's replies are `generated` and never are.
+Verified: `{'external': 1, 'generated': 1}`. Without that the system could cite
+an answer a model invented as evidence for a claim it then makes.
+
+## Sending
+
+`SEND_ENABLED=false`, and the whole path runs against a transport that records
+instead of delivering — so enabling it changes where the bytes go and nothing
+else. The real Gmail transport is **deliberately unimplemented**; it raises
+with the three steps to enable it. The AST test forbidding a live send path
+still passes and was not weakened.
+
+Confirmation is bound to a hash of the exact content: approve a draft, edit the
+body, and the approval is void by construction.
+
+## Three things most likely wrong
+
+1. **The judge may be too strict.** It rejected 4 of 4 on real data. That is
+   the safe direction by design, but I have not seen it accept anything yet, so
+   its precision is unmeasured in the positive direction.
+2. **The desktop shell has never been run.** It compiles as written but needs
+   `rustup` and `npm install`; I did not install a Rust toolchain to prove it.
+3. **Edge weights and sweep confidences are still invented numbers.** `0.72`
+   means "17 days out on a 30-day horizon", not "72% likely to matter".
+
+## Still not built, honestly
+
+Transcription, screen context, calendar authorisation. Those need you at a
+keyboard or a consent design, not more code.
