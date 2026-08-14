@@ -1,0 +1,24 @@
+<link rel="stylesheet" href="style.css">
+<main id="app">
+  <header>
+    <h1>PersonalAGI</h1>
+    <div id="state" class="live" title="Closing this window halts capture">
+      <span class="dot"></span><span id="state-text">active</span>
+    </div>
+  </header>
+
+  <nav>
+    <button data-cmd="sweep" class="on">What needs me</button>
+    <button data-cmd="owed">Owed</button>
+    <button data-cmd="gaps">Gaps</button>
+    <button data-cmd="brief">Brief</button>
+    <button data-cmd="suppressed" class="quiet">What it didn't say</button>
+  </nav>
+
+  <section id="out"><p class="hint">Pick a view.</p></section>
+
+  <footer>
+    <p>Open means active. Closing this window halts capture.</p>
+  </footer>
+</main>
+<script type="module" src="main.js"></script>

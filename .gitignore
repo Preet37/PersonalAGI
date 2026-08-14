@@ -37,3 +37,8 @@ dist/
 
 # macOS
 .DS_Store
+
+# Tauri build output
+desktop/node_modules/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/

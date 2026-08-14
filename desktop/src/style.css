@@ -1,0 +1,59 @@
+/* Dark by default: this window sits open all day beside an editor. */
+:root {
+  color-scheme: dark;
+  --bg: #0f1115; --panel: #161a21; --line: #262c37;
+  --ink: #e6e9ef; --dim: #8b93a3;
+  --live: #46d17f; --halted: #6b7280; --warn: #f0b429; --urgent: #ef6461;
+  font-family: ui-sans-serif, -apple-system, "SF Pro Text", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-size: 13px; }
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 10px; border-bottom: 1px solid var(--line);
+}
+h1 { margin: 0; font-size: 14px; font-weight: 600; letter-spacing: .01em; }
+
+/* The capture indicator. Deliberately prominent: the whole design rests on
+   the state being obvious without reading anything. */
+#state { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--halted); }
+#state.live .dot { background: var(--live); box-shadow: 0 0 0 3px rgb(70 209 127 / .16); }
+#state.live { color: var(--live); }
+
+nav { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px; }
+nav button {
+  background: var(--panel); color: var(--dim); border: 1px solid var(--line);
+  border-radius: 7px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+}
+nav button:hover { color: var(--ink); }
+nav button.on { background: #1d2b3a; color: #cfe4ff; border-color: #2d4a6b; }
+nav button.quiet { margin-left: auto; font-style: italic; }
+
+#out { flex: 1; overflow-y: auto; padding: 4px 14px 16px; }
+pre {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px; line-height: 1.55; color: var(--ink);
+}
+.hint { color: var(--dim); }
+.err { color: var(--urgent); }
+
+/* Attention levels, rendered as the left edge of a card. */
+.card { background: var(--panel); border: 1px solid var(--line); border-left-width: 3px;
+        border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.card.interrupt { border-left-color: var(--urgent); }
+.card.nudge { border-left-color: var(--warn); }
+.card.ambient { border-left-color: var(--line); }
+.card .why { color: var(--dim); font-size: 11px; margin-top: 6px; }
+.card .acts { display: flex; gap: 6px; margin-top: 9px; }
+.card button {
+  background: transparent; border: 1px solid var(--line); color: var(--dim);
+  border-radius: 6px; padding: 3px 9px; font-size: 11px; cursor: pointer;
+}
+.card button:hover { color: var(--ink); border-color: #3a4353; }
+
+footer { border-top: 1px solid var(--line); padding: 8px 16px; }
+footer p { margin: 0; color: var(--dim); font-size: 11px; }

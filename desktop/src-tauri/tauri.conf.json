@@ -1,0 +1,28 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PersonalAGI",
+  "version": "0.1.0",
+  "identifier": "dev.hackdev.personalagi",
+  "build": { "frontendDist": "../src" },
+  "app": {
+    "windows": [
+      {
+        "title": "PersonalAGI",
+        "width": 460,
+        "height": 720,
+        "resizable": true,
+        "visible": true,
+        "alwaysOnTop": false,
+        "decorations": true
+      }
+    ],
+    "security": { "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'" },
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.png",
+      "tooltip": "PersonalAGI — active",
+      "menuOnLeftClick": false
+    }
+  },
+  "bundle": { "active": true, "targets": "app", "icon": ["icons/icon.png"] }
+}
