@@ -18,7 +18,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from personalagi.context.people import slug_for
+from personalagi.context.people import slug_for, strip_directory_uid
 from personalagi.identity import automated_by_header, looks_automated
 
 FROM, TO, CC, ATTENDEE = "from", "to", "cc", "attendee"
@@ -111,7 +111,10 @@ def resolve_participant(
 
     record = ParticipantRecord(
         address=normalized,
-        display_name=(display_name or "").strip().strip('"'),
+        # Stripped here too, not just in the slug: otherwise every brief and
+        # prep header reads "DJ Sampath (djsam)", showing the reader a
+        # corporate login they never think of as part of the name.
+        display_name=strip_directory_uid((display_name or "").strip().strip('"')),
         role=role,
         is_owner=normalized in owner_addresses,
     )
