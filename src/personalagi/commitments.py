@@ -50,6 +50,11 @@ class PersonOwed:
     def stale_count(self) -> int:
         return sum(1 for c in self.items if c.status == STALE)
 
+    @property
+    def top_stakes(self) -> int:
+        rank = {"high": 2, "medium": 1, "low": 0}
+        return max((rank.get(c.stakes, 1) for c in self.items), default=1)
+
 
 def refresh_activity(settings: Settings | None = None) -> int:
     """Push `last_activity_at` forward when a conversation has continued.
@@ -171,8 +176,9 @@ def list_owed(
     for entry in grouped.values():
         entry.items.sort(key=lambda c: c.promised_at)
 
-    # Oldest debt first: the thing rotting longest is the thing to deal with.
-    return sorted(grouped.values(), key=lambda e: e.oldest)
+    # STAKES first, then age. Age alone put "wait lemme resend the link twin"
+    # above a promise to a recruiter, which is how the list becomes noise.
+    return sorted(grouped.values(), key=lambda e: (-e.top_stakes, e.oldest))
 
 
 def close_commitment(
@@ -222,7 +228,8 @@ def render_owed(groups: list[PersonOwed], *, direction: str = "i_owe") -> str:
             age = (datetime.now(UTC).replace(tzinfo=None) - since).days
             due = f"  (said: {item.due_text})" if item.due_text else ""
             mark = "!" if item.status == STALE else "-"
-            lines.append(f"  {mark} [{item.id}] {item.what}{due}   {age}d ago")
+            stakes = f" [{item.stakes}]" if item.stakes != "medium" else ""
+            lines.append(f"  {mark} [{item.id}] {item.what}{due}{stakes}   {age}d ago")
             lines.append(f'      "{item.quote}"')
         lines.append("")
 

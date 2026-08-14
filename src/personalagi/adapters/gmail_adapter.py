@@ -170,9 +170,23 @@ def sync_events(
         if account:
             stmt = stmt.where(Message.account_label == account)
         if not rebuild:
-            # Only messages with no Event yet. Event.id == Message.id makes
-            # this a cheap id comparison rather than a join on source_id.
-            stmt = stmt.where(Message.id.not_in(select(Event.id)))
+            # Match on the SOURCE ID, never on the row id.
+            #
+            # Stage 8 assigned Event.id = Message.id so a migration could be a
+            # column rename instead of a remapping. That was correct while
+            # Gmail was the only source. It became a landmine at three: iMessage
+            # and Claude events take ids from the same sequence, so 350 message
+            # ids collided with non-Gmail event ids and `not_in(Event.id)`
+            # silently excluded every one of them -- 481 messages sat
+            # unprojected while ingest reported success.
+            #
+            # The id-sharing scheme is now history: existing rows keep their
+            # ids and their foreign keys, and new events are assigned ids by
+            # SQLite like any other source.
+            already = select(Event.source_id).where(Event.source == SOURCE)
+            if account:
+                already = already.where(Event.account_label == account)
+            stmt = stmt.where(Message.gmail_id.not_in(already))
         stmt = stmt.order_by(Message.internal_date_ms.desc())
         if limit:
             stmt = stmt.limit(limit)
@@ -202,11 +216,31 @@ def sync_events(
             record = event_from_message(
                 message, owner_addresses=owner_addresses, shared=shared
             )
-            event_rows.append(record.as_row(now, event_id=message.id))
-            participant_rows.extend(p.as_row(message.id) for p in record.participants)
+            # No forced id. Passing message.id here would collide with the
+            # events another source already owns at that number.
+            event_rows.append(record.as_row(now))
 
         with Session(get_engine(settings)) as session:
             events += _upsert_events(session, event_rows)
+            session.commit()
+
+            # Participants need the id SQLite actually assigned, so they are
+            # attached after the events land rather than guessed beforehand.
+            ids = dict(
+                session.execute(
+                    select(Event.source_id, Event.id)
+                    .where(Event.source == SOURCE)
+                    .where(Event.source_id.in_([m.gmail_id for m in batch]))
+                ).all()
+            )
+            participant_rows = [
+                p.as_row(ids[message.gmail_id])
+                for message in batch
+                if message.gmail_id in ids
+                for p in event_from_message(
+                    message, owner_addresses=owner_addresses, shared=shared
+                ).participants
+            ]
             participants += _upsert_participants(session, participant_rows)
             session.commit()
         log.info(
@@ -215,3 +249,35 @@ def sync_events(
 
     log.info("projected %d event(s), %d participant(s)", events, participants)
     return events, participants
+
+
+def projection_lag(settings: Settings | None = None) -> dict[str, int]:
+    """Messages ingested but never projected, per account.
+
+    Lives here rather than in the CLI because comparing the Gmail landing
+    table to Events requires knowing both, and only an adapter may.
+    """
+    from sqlalchemy import func
+
+    settings = settings or get_settings()
+    init_db(settings)
+    with Session(get_engine(settings)) as session:
+        messages = dict(
+            session.execute(
+                select(Message.account_label, func.count()).group_by(
+                    Message.account_label
+                )
+            ).all()
+        )
+        events = dict(
+            session.execute(
+                select(Event.account_label, func.count())
+                .where(Event.source == SOURCE)
+                .group_by(Event.account_label)
+            ).all()
+        )
+    return {
+        label: count - events.get(label, 0)
+        for label, count in messages.items()
+        if count - events.get(label, 0) > 0
+    }

@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 
+from googleapiclient.errors import HttpError
 from sqlalchemy import func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlmodel import Session
@@ -134,6 +135,19 @@ def _fetch_and_normalize(
     def fetch_one(message_id: str):
         try:
             raw = fetch.get_message(client_for_thread(), message_id)
+        except HttpError as exc:
+            if getattr(exc.resp, "status", None) == 404:
+                # Listed, then deleted or moved before the fetch reached it.
+                # A routine race, not a fault -- but the first version printed
+                # a full traceback for each one, and nine tracebacks for a
+                # normal condition is how a real error gets scrolled past.
+                log.info(
+                    "%s: message %s vanished between list and fetch (404)",
+                    label, message_id,
+                )
+            else:
+                log.exception("%s: failed to fetch message %s", label, message_id)
+            return None
         except Exception:
             # One bad message must not abandon the batch; the cursor simply
             # will not advance past it on this run.

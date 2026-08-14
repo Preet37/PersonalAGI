@@ -143,6 +143,22 @@ def slugify(value: str) -> str:
     return slug or "unknown"
 
 
+# "Arjun Sambamoorthy (asambamo)" -- a corporate directory stamping the login
+# onto the display name. Cisco does it, and so do most large Exchange
+# deployments. The parenthetical is not part of anyone's name, and leaving it
+# in split one real person into two records: `arjun-sambamoorthy` from a
+# LinkedIn invitation and `arjun-sambamoorthy-asambamo` from his work address.
+#
+# Only stripped when the contents look like a username -- no spaces, short.
+# "Bob (Robert)" and "Sam (maternity cover)" keep their parentheses, because
+# guessing wrong there merges two people, which is far worse than splitting one.
+_DIRECTORY_UID_RE = re.compile(r"\s*\([A-Za-z0-9._-]{2,20}\)\s*$")
+
+
+def strip_directory_uid(name: str) -> str:
+    return _DIRECTORY_UID_RE.sub("", name or "").strip()
+
+
 def slug_for(name: str, email: str) -> str:
     """Prefer the display name; fall back to the address's local part.
 
@@ -150,6 +166,7 @@ def slug_for(name: str, email: str) -> str:
     this slug, so one human with two display names becomes two files. Merging
     is a manual edit today.
     """
+    name = strip_directory_uid(name)
     if name and name.strip() and "@" not in name:
         return slugify(name)
     local = (email or "").split("@", 1)[0]

@@ -280,6 +280,17 @@ class Commitment(SQLModel, table=True):
     # extraction run, exactly like a person file's `corrections`.
     manually_closed: bool = False
 
+    # How much it costs if this is never done: high | medium | low.
+    #
+    # Age alone ranked "wait lemme resend the link twin" alongside a promise to
+    # a recruiter, which is how a useful list becomes noise. Register is real
+    # evidence about consequence and the model reads it well.
+    stakes: str = Field(default="medium", index=True)
+    # Why the resolver reached its verdict, so a wrong close is diagnosable
+    # rather than mysterious.
+    resolution_why: str = ""
+    resolved_by: str = Field(default="", index=True)  # "" | model | human
+
     model: str = ""
     prompt_version: str = ""
     extracted_at: datetime

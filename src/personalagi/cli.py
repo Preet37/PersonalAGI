@@ -264,6 +264,12 @@ def _build_parser() -> argparse.ArgumentParser:
     owed.add_argument("--person", default=None, help="filter to one person slug")
     owed.add_argument("--include-done", action="store_true")
 
+    res = sub.add_parser(
+        "resolve", help="close commitments the world has moved past, and rank by stakes"
+    )
+    res.add_argument("--budget", type=int, default=40)
+    res.add_argument("--all", action="store_true", help="re-check closed ones too")
+
     done = sub.add_parser("done", help="mark a commitment as fulfilled")
     done.add_argument("commitment_id", type=int)
 
@@ -390,6 +396,22 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
 
     for result in results:
         print(result.summary())
+
+    if not args.dry_run:
+        # Project into Events IMMEDIATELY. This used to be a separate
+        # `sync-events` step, and the consequence was that 481 messages from
+        # two newly-authorized accounts sat in the database completely
+        # invisible to every downstream command -- prep, sweep, relevance, the
+        # brief. The ingest reported success the whole time.
+        #
+        # A pipeline stage a person has to remember is a pipeline stage that
+        # gets forgotten, and this one failed silently when it was.
+        from personalagi.adapters.gmail_adapter import sync_events
+
+        events, participants = sync_events(settings)
+        if events or participants:
+            print(f"projected {events} event(s), {participants} participant(s)")
+
     return 1 if any(r.mode == "failed" for r in results) else 0
 
 
@@ -831,6 +853,19 @@ def _cmd_owed(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_resolve(args: argparse.Namespace) -> int:
+    from personalagi.records import CallBudget
+    from personalagi.resolve import resolve_commitments
+
+    result = resolve_commitments(
+        get_settings(), budget=CallBudget(limit=args.budget), only_open=not args.all
+    )
+    print(result.summary())
+    for note in result.notes:
+        print(f"  closed  {note}")
+    return 0
+
+
 def _cmd_done(args: argparse.Namespace) -> int:
     from personalagi.commitments import close_commitment
 
@@ -1072,6 +1107,22 @@ def _cmd_status(_: argparse.Namespace) -> int:
                 f"last_sync={state.last_synced_at or '-'} "
                 f"history_id={state.last_history_id or '-'}"
             )
+
+        # Projection lag, stated loudly. Messages that never became Events are
+        # invisible to everything downstream while every command still reports
+        # success, so silence here is exactly the wrong default.
+        from personalagi.adapters.gmail_adapter import projection_lag
+
+        lagging = projection_lag(settings)
+        if lagging:
+            print()
+            print("UNPROJECTED MESSAGES -- invisible to prep, sweep, brief:")
+            for label, behind in sorted(lagging.items()):
+                print(f"  {label:12} {behind} message(s) with no Event")
+            print("  fix: python -m personalagi sync-events")
+        else:
+            print()
+            print("all messages projected into events")
     return 0
 
 
@@ -1102,6 +1153,7 @@ def main(argv: list[str] | None = None) -> int:
         "facts": _cmd_facts,
         "contradictions": _cmd_contradictions,
         "owed": _cmd_owed,
+        "resolve": _cmd_resolve,
         "done": _cmd_done,
         "labels-template": _cmd_labels_template,
         "eval": _cmd_eval,
