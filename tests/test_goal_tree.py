@@ -171,7 +171,11 @@ class TestSync:
 
         sync_tree(settings)
         path = settings.context_dir / "goals" / "goals.md"
-        path.write_text(TREE.replace("### McCoy\npeople: sameer-mccoy\n- [ ] Follow up on the full-time conversation\n", ""))
+        mccoy = (
+            "### McCoy\npeople: sameer-mccoy\n"
+            "- [ ] Follow up on the full-time conversation\n"
+        )
+        path.write_text(TREE.replace(mccoy, ""))
         sync_tree(settings)
 
         with Session(db_module.get_engine(settings)) as session:
