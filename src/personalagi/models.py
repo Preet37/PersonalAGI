@@ -322,6 +322,11 @@ class Goal(SQLModel, table=True):
     # active | done | abandoned | blocked
     status: str = Field(default="active", index=True)
 
+    # Parent goal's slug, or "" for a top-level goal. Goals nest: Cisco is one
+    # of five paths to a full-time role, not a goal in its own right, and
+    # activity on a child is activity on the parent.
+    parent_slug: str = Field(default="", index=True)
+
     # Last time ANY linked event, commitment, or step moved. Distinct from
     # updated_at, which changes when the goal text is edited — editing a
     # description is not progress and must not reset a staleness clock.

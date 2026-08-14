@@ -149,7 +149,8 @@ def _build_parser() -> argparse.ArgumentParser:
     g_show = goal_sub.add_parser("show", help="one goal with its steps and evidence")
     g_show.add_argument("slug")
 
-    goal_sub.add_parser("sync", help="rebuild the index from context/goals/*.md")
+    goal_sub.add_parser("sync", help="rebuild the index from context/goals/goals.md")
+    goal_sub.add_parser("tree", help="the nested goal outline")
 
     g_link = goal_sub.add_parser(
         "link", help="search all sources for evidence supporting each open step"
@@ -578,7 +579,27 @@ def _cmd_goal(args: argparse.Namespace) -> int:
         return 0
 
     if command == "sync":
-        print(goals_mod.sync_goals(settings).summary())
+        from personalagi.goal_tree import sync_tree
+
+        counts = sync_tree(settings)
+        if counts["goals"]:
+            print(
+                f"goals.md: {counts['goals']} goal(s), {counts['steps']} step(s), "
+                f"{counts['people']} role(s)"
+            )
+            if counts["proposed"]:
+                print(
+                    f"  {counts['proposed']} proposed by the system, waiting on you "
+                    "(see `## Proposed` in goals.md)"
+                )
+        else:
+            print(goals_mod.sync_goals(settings).summary())
+        return 0
+
+    if command == "tree":
+        from personalagi.goal_tree import load_tree, render_tree
+
+        print(render_tree(load_tree(settings)))
         return 0
 
     if command == "list":
